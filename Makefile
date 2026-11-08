@@ -1,67 +1,78 @@
-.PHONY: help build test clean examples install deps fmt check docs
+.PHONY: help build test test-destructive vet fmt fmt-check examples clean install deps docs check
+
+GO ?= go
+PACKAGES = ./...
 
 help:
 	@echo "FreeBSD Go ZFS Library"
 	@echo "======================"
 	@echo ""
 	@echo "Available targets:"
-	@echo "  build             - Build all binaries"
-	@echo "  test              - Run unit tests"
-	@echo "  examples          - Build all example programs"
-	@echo "  clean             - Clean build artifacts"
-	@echo "  install           - Install as Go module"
-	@echo "  deps              - Check system dependencies"
+	@echo "  build             - Build all packages and examples"
+	@echo "  test              - Run tests that do not modify the system"
+	@echo "  test-destructive  - Run all tests, including ones that create pools (root)"
+	@echo "  vet               - Run go vet"
 	@echo "  fmt               - Format code"
-	@echo "  check             - Run all checks (fmt, test)"
-	@echo "  docs              - Generate documentation"
+	@echo "  fmt-check         - Fail if any file is not gofmt-formatted"
+	@echo "  examples          - Build example programs into ./bin"
+	@echo "  clean             - Remove build artifacts"
+	@echo "  install           - Download and tidy module dependencies"
+	@echo "  deps              - Check system dependencies"
+	@echo "  check             - fmt-check, vet and test"
+	@echo "  docs              - Print package documentation"
 	@echo ""
 
-build: examples
+build:
+	$(GO) build $(PACKAGES)
 
 test:
-	@echo "Running unit tests for core library..."
-	go test ./internal/driver ./zfs ./zpool ./version ./errors
+	$(GO) test -count=1 $(PACKAGES)
 
+# Creates and destroys throwaway file-backed pools under /var/tmp. Packages
+# run one at a time because tests observe global pool state.
+test-destructive:
+	@if [ "$$(id -u)" != 0 ]; then echo "test-destructive must run as root (e.g. doas make test-destructive)"; exit 1; fi
+	ZFS_TEST_DESTRUCTIVE=1 $(GO) test -count=1 -p 1 $(PACKAGES)
+
+vet:
+	$(GO) vet $(PACKAGES)
+
+fmt:
+	gofmt -s -w .
+
+fmt-check:
+	@unformatted=$$(gofmt -l .); \
+	if [ -n "$$unformatted" ]; then echo "Not gofmt-formatted:"; echo "$$unformatted"; exit 1; fi
 
 examples:
-	@echo "Building example programs..."
+	@mkdir -p bin
 	@for dir in examples/*/; do \
-		if [ -f "$$dir/main.go" ]; then \
-			echo "Building $$dir..."; \
-			(cd "$$dir" && go build -o "$$(basename $$dir)" main.go) || true; \
-		fi \
+		name=$$(basename $$dir); \
+		echo "Building $$name"; \
+		$(GO) build -o bin/$$name ./$$dir || exit 1; \
 	done
 
 clean:
-	@echo "Cleaning build artifacts..."
-	find ./** -type f -executable -delete 2>/dev/null || true
+	rm -rf bin
 
 install:
-	@echo "Installing module dependencies..."
-	go mod download
-	go mod tidy
+	$(GO) mod download
+	$(GO) mod tidy
 
 deps:
 	@echo "Checking system dependencies..."
 	@echo -n "Go version: "
-	@go version || (echo "Error: Go not found" && exit 1)
+	@$(GO) version || (echo "Error: Go not found" && exit 1)
 	@echo -n "FreeBSD version: "
 	@freebsd-version || (echo "Error: Not running on FreeBSD" && exit 1)
 	@echo -n "ZFS kernel module: "
-	@kldstat | grep zfs >/dev/null && echo "loaded" || echo "not loaded"
+	@kldstat -q -m zfs && echo "loaded" || echo "not loaded"
 	@echo -n "libzfs library: "
-	@ldconfig -r | grep libzfs >/dev/null && echo "found" || echo "not found"
+	@ldconfig -r | grep -q libzfs && echo "found" || echo "not found"
 	@echo -n "OpenZFS headers: "
-	@[ -d "/usr/src/sys/contrib/openzfs/include" ] && echo "found" || echo "not found"
+	@[ -f "/usr/src/sys/contrib/openzfs/include/libzfs.h" ] && echo "found" || echo "not found (see CONTRIBUTING.md)"
 
-fmt:
-	@echo "Formatting core library code..."
-	go fmt ./internal/... ./zfs ./zpool ./version ./errors
-	gofmt -s -w ./internal/ ./zfs/ ./zpool/ ./version/ ./errors/
-
-check: fmt test
-	@echo "All checks passed!"
+check: fmt-check vet test
 
 docs:
-	@echo "Generating documentation..."
-	go doc -all ./...
+	$(GO) doc -all ./zfs ./zpool ./version ./errors

@@ -17,7 +17,7 @@ This guide provides detailed information for developers working on the go-freebs
 
 ### Prerequisites
 
-- FreeBSD 13.2+ with OpenZFS support
+- FreeBSD 14 or 15 (OpenZFS 2.2+)
 - Go 1.22+
 - Git
 - Development tools: `make`, `gcc`
@@ -28,11 +28,12 @@ This guide provides detailed information for developers working on the go-freebs
 1. **Install OpenZFS Development Headers**
 
    ```bash
-   # Ensure source tree is available
-   ls /usr/src/sys/contrib/openzfs/include/
+   # Check whether the headers are available
+   ls /usr/src/sys/contrib/openzfs/include/libzfs.h
 
-   # If not available, install src distribution
-   pkg install src
+   # If not, extract them from the src.txz of the running release
+   # (see CONTRIBUTING.md), or let the CI script do it:
+   doas sh .github/scripts/freebsd-ci-prepare.sh
    ```
 
 2. **Clone and Setup**
@@ -52,7 +53,7 @@ This guide provides detailed information for developers working on the go-freebs
 ### Development Tools
 
 - **Editor**: VS Code with Go extension recommended
-- **Linter**: `golangci-lint`
+- **Linter**: `go vet` (run by CI)
 - **Formatter**: `gofmt` and `goimports`
 - **Documentation**: `godoc`
 
@@ -71,7 +72,7 @@ This guide provides detailed information for developers working on the go-freebs
 │   └── cgo/          # C integration layer
 ├── examples/         # Example programs
 ├── docs/             # Documentation
-└── integration-tests/ # Integration test suite
+└── .github/          # CI workflow and scripts
 ```
 
 ### Driver Abstraction
@@ -286,106 +287,50 @@ func createNVList(props map[string]string) (*C.nvlist_t, error) {
 
 ## Testing Strategy
 
-### Test Types
+Tests live next to the code they test (`*_test.go`) and come in three kinds:
 
-1. **Unit Tests** (`*_test.go`)
+1. **Unit tests** — pure Go, no ZFS needed (e.g. `errors`, string mappings in
+   `internal/driver`).
+2. **Read-only integration tests** — run against the first imported pool and
+   compare the library with the `zfs`/`zpool` commands (GUIDs, property
+   sources, listings, versions). They run as any user and skip without pools.
+   Examples: `zfs/zfs_integration_test.go`, `zpool/zpool_integration_test.go`.
+3. **Destructive integration tests** — create their own file-backed pools
+   (`gozfs_*` under `/var/tmp`) and export, import, offline, corrupt, scrub and
+   destroy them. They run only as root with `ZFS_TEST_DESTRUCTIVE=1`.
+   Examples: `zpool/zpool_import_test.go`, `zpool_discover_test.go`,
+   `zpool_status_test.go`.
 
-   - Test public API contracts
-   - Mock internal dependencies
-   - No external ZFS dependencies
-   - Fast execution
+```bash
+make test                     # unit + read-only
+doas make test-destructive    # everything, packages one at a time
+```
 
-2. **Integration Tests** (`integration-tests/`)
-
-   - Test with real ZFS system
-   - Require root privileges
-   - Use temporary datasets/pools
-   - Comprehensive scenarios
-
-3. **Example Programs** (`examples/`)
-   - Serve as living documentation
-   - Manual testing scenarios
-   - Safe for development systems
-
-### Writing Unit Tests
+### Destructive test pattern
 
 ```go
-// zfs/zfs_test.go
-func TestClient_CreateDataset(t *testing.T) {
-    tests := []struct {
-        name    string
-        dataset string
-        dsType  DatasetType
-        props   map[string]string
-        wantErr bool
-    }{
-        {
-            name:    "valid filesystem",
-            dataset: "tank/test",
-            dsType:  DatasetTypeFilesystem,
-            props:   map[string]string{"compression": "lz4"},
-            wantErr: false,
-        },
-        {
-            name:    "invalid dataset name",
-            dataset: "",
-            dsType:  DatasetTypeFilesystem,
-            props:   nil,
-            wantErr: true,
-        },
-    }
+func TestImportExportedPool(t *testing.T) {
+	p := newTestPool(t) // skips unless root + ZFS_TEST_DESTRUCTIVE=1; cleans up
+	p.export(t)
 
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            // Test implementation
-        })
-    }
+	err := newClient(t).Import(context.Background(), p.name,
+		ImportOptions{SearchPaths: []string{p.dir}})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if !poolImported(p.name) {
+		t.Fatalf("pool %s not imported", p.name)
+	}
 }
 ```
 
-### Integration Test Pattern
+`createTestPool(t, prefix, disks, mirror)` builds multi-disk and mirror pools;
+`run(t, cmd, args...)` runs a command and fails the test on error. Scan states
+can be observed deterministically by freezing scans with
+`vfs.zfs.scan_suspend_progress` (see `suspendScans`).
 
-```go
-// integration-tests/clone_test.go
-func TestCloneOperations(t *testing.T) {
-    if os.Getuid() != 0 {
-        t.Skip("Integration tests require root privileges")
-    }
-
-    ctx := context.Background()
-    client, err := zfs.New(ctx)
-    require.NoError(t, err)
-    defer client.Close()
-
-    // Setup test dataset
-    testDataset := "tank/integration-test-" + generateID()
-    defer client.Destroy(ctx, testDataset, true) // Cleanup
-
-    err = client.CreateFilesystem(ctx, testDataset, nil)
-    require.NoError(t, err)
-
-    // Test clone operations...
-}
-```
-
-### Test Data Management
-
-```go
-func generateTestDatasetName() string {
-    return fmt.Sprintf("tank/test-%d-%s",
-        time.Now().Unix(),
-        randomString(8))
-}
-
-func ensureTestDatasetCleanup(t *testing.T, client *zfs.Client, name string) {
-    t.Cleanup(func() {
-        ctx := context.Background()
-        if err := client.Destroy(ctx, name, true); err != nil {
-            t.Logf("Failed to cleanup test dataset %s: %v", name, err)
-        }
-    })
-}
-```
+CI runs all three kinds on FreeBSD 14.5 and 15.1 VMs, see
+[CONTRIBUTING.md](../CONTRIBUTING.md#continuous-integration).
 
 ## Debugging
 
@@ -477,8 +422,7 @@ Use semantic versioning (semver):
 1. **Code Quality**
 
    - [ ] All tests pass
-   - [ ] Linter passes without errors
-   - [ ] Code coverage > 80%
+   - [ ] CI is green on all FreeBSD versions
    - [ ] Documentation updated
 
 2. **Testing**
@@ -532,13 +476,10 @@ go get github.com/zombocoder/go-freebsd-libzfs@latest
 fatal error: 'libzfs.h' file not found
 ```
 
-**Solution**: Ensure OpenZFS source is available
+**Solution**: Install the OpenZFS headers from the `src.txz` of the running
+release (see [CONTRIBUTING.md](../CONTRIBUTING.md#openzfs-headers)), then verify:
 
 ```bash
-# Install source distribution
-pkg install src
-
-# Verify headers exist
 ls /usr/src/sys/contrib/openzfs/include/libzfs.h
 ```
 
@@ -593,7 +534,7 @@ runtime: memory corruption detected
 ### Code Style
 
 - Follow standard Go conventions
-- Use `gofmt` and `goimports`
+- Use `gofmt` (enforced by CI)
 - Write comprehensive comments for exported functions
 - Include context.Context in all public APIs
 

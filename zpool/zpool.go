@@ -156,16 +156,33 @@ type ImportablePool struct {
 	DevicePaths []string // Devices that make up this pool
 }
 
-// Discover finds pools that can be imported
+// Discover finds pools that are not imported but can be, like `zpool import`
+// without arguments. Results are sorted by name.
 func (c *Client) Discover(ctx context.Context, opts DiscoverOptions) ([]ImportablePool, error) {
 	if c.d == nil {
 		return nil, fmt.Errorf("client is closed")
 	}
 
-	// TODO: Implement pool discovery via driver
-	// This would call zpool_find_import through the driver interface
-	// For now, return empty list since it requires additional driver method
-	return []ImportablePool{}, nil
+	found, err := c.d.DiscoverPools(ctx, driver.DiscoverOptions{
+		SearchPaths:      opts.SearchPaths,
+		IncludeDestroyed: opts.IncludeDestroyed,
+		PoolName:         opts.PoolName,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	pools := make([]ImportablePool, 0, len(found))
+	for _, p := range found {
+		pools = append(pools, ImportablePool{
+			Name:        p.Name,
+			GUID:        p.GUID,
+			State:       p.State,
+			Health:      p.Health,
+			DevicePaths: p.DevicePaths,
+		})
+	}
+	return pools, nil
 }
 
 // CreateOptions represents options for pool creation
@@ -213,6 +230,7 @@ const (
 	PropertySourceDefault   PropertySource = "default"
 	PropertySourceTemporary PropertySource = "temporary"
 	PropertySourceReceived  PropertySource = "received"
+	PropertySourceNone      PropertySource = "none" // read-only or statistic property
 )
 
 // Common pool property names
@@ -304,16 +322,29 @@ func (c *Client) GetUint64Property(ctx context.Context, poolName, propName strin
 	return 0, fmt.Errorf("property %q is not a uint64", propName)
 }
 
-// Status represents detailed pool status information
+// Status represents detailed pool status information, as shown by
+// `zpool status`.
 type Status struct {
 	Pool   Pool
-	Config VDevTree
+	Config VDevTree   // Root of the data vdev tree (includes log/special vdevs)
+	Spares []VDevTree // Hot spares
+	Cache  []VDevTree // L2ARC cache devices
 	Errors ErrorStats
-	Scan   *ScanStatus
+	Scan   *ScanStatus // nil when the pool was never scrubbed or resilvered
+
+	// Problem is the name of the most important pool status condition, e.g.
+	// "OK", "OFFLINE_DEV", "FAILING_DEV", "RESILVERING" (ZPOOL_STATUS_* without
+	// the prefix).
+	Problem string
+	// MsgID is the ZFS message identifier describing Problem (e.g.
+	// "ZFS-8000-9P"), see https://openzfs.github.io/openzfs-docs/msg/. Empty
+	// when there is no associated message.
+	MsgID string
 }
 
 // VDevTree represents the virtual device tree structure
 type VDevTree struct {
+	Name     string // Display name as in `zpool status` (pool name for the root)
 	Type     string
 	Path     string
 	GUID     uint64
@@ -337,6 +368,10 @@ type ErrorStats struct {
 	Read  uint64
 	Write uint64
 	Cksum uint64
+
+	// DataErrors is the number of persistent data errors (files with
+	// unrecoverable damage) recorded in the pool's error log.
+	DataErrors uint64
 }
 
 // ScanStatus represents scrub/resilver status
@@ -345,14 +380,14 @@ type ScanStatus struct {
 	State        ScanState    // Scanning, Finished, Canceled, etc.
 	StartTime    time.Time
 	EndTime      *time.Time
-	Examined     uint64
-	ToExamine    uint64
-	Processed    uint64
-	ToProcess    uint64
+	Examined     uint64 // Bytes located by the scanner
+	ToExamine    uint64 // Total bytes to scan
+	Issued       uint64 // Bytes verified so far ("issued" in zpool status)
+	Processed    uint64 // Bytes repaired (scrub) or resilvered
 	Errors       uint64
 	PassExamined uint64
 	PassStart    time.Time
-	Rate         uint64 // bytes per second (calculated)
+	Rate         uint64 // Bytes issued per second in the current pass; 0 unless scanning
 }
 
 // ScanFunction represents the type of scan operation
@@ -383,7 +418,7 @@ const (
 	ScanStateScanning
 	ScanStateFinished
 	ScanStateCanceled
-	ScanStateSuspended
+	ScanStateSuspended // a paused scrub
 )
 
 func (s ScanState) String() string {
@@ -413,34 +448,138 @@ func (c *Client) GetStatus(ctx context.Context, poolName string) (*Status, error
 		return nil, fmt.Errorf("failed to get pool %s: %w", poolName, err)
 	}
 
-	status := &Status{
-		Pool: *pool,
+	ds, err := c.d.GetPoolStatus(ctx, poolName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get status of pool %s: %w", poolName, err)
 	}
 
-	// TODO: Implement vdev tree parsing and scan status
-	// This requires complex nvlist parsing that we'll implement next
-
+	status := &Status{
+		Pool:    *pool,
+		Config:  convertVdev(ds.Root),
+		Spares:  convertVdevs(ds.Spares),
+		Cache:   convertVdevs(ds.Cache),
+		Scan:    convertScan(ds.Scan, time.Now()),
+		Problem: ds.Problem,
+		MsgID:   ds.MsgID,
+		Errors: ErrorStats{
+			Read:       ds.Root.ReadErrors,
+			Write:      ds.Root.WriteErrors,
+			Cksum:      ds.Root.ChecksumErrors,
+			DataErrors: ds.DataErrors,
+		},
+	}
 	return status, nil
 }
 
-// StartScrub starts a scrub operation on a pool
+func convertVdevs(in []driver.VdevStatus) []VDevTree {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]VDevTree, 0, len(in))
+	for _, v := range in {
+		out = append(out, convertVdev(v))
+	}
+	return out
+}
+
+func convertVdev(v driver.VdevStatus) VDevTree {
+	return VDevTree{
+		Name:  v.Name,
+		Type:  v.Type,
+		Path:  v.Path,
+		GUID:  v.GUID,
+		State: v.State,
+		Stats: VDevStats{
+			Alloc:          v.Alloc,
+			Space:          v.Space,
+			DSpace:         v.DSpace,
+			ReadErrors:     v.ReadErrors,
+			WriteErrors:    v.WriteErrors,
+			ChecksumErrors: v.ChecksumErrors,
+		},
+		Children: convertVdevs(v.Children),
+	}
+}
+
+// convertScan maps driver scan statistics; it returns nil for a pool that was
+// never scanned.
+func convertScan(s *driver.ScanStats, now time.Time) *ScanStatus {
+	if s == nil || (s.Function == driver.PoolScanNone && s.State == driver.PoolScanStateNone) {
+		return nil
+	}
+
+	scan := &ScanStatus{
+		StartTime:    time.Unix(int64(s.StartTime), 0),
+		Examined:     s.Examined,
+		ToExamine:    s.ToExamine,
+		Issued:       s.Issued,
+		Processed:    s.Processed,
+		Errors:       s.Errors,
+		PassExamined: s.PassExamined,
+		PassStart:    time.Unix(int64(s.PassStart), 0),
+	}
+
+	switch s.Function {
+	case driver.PoolScanScrub:
+		scan.Function = ScanFunctionScrub
+	case driver.PoolScanResilver:
+		scan.Function = ScanFunctionResilver
+	}
+
+	switch s.State {
+	case driver.PoolScanStateScanning:
+		scan.State = ScanStateScanning
+		if s.PassPausedAt != 0 {
+			scan.State = ScanStateSuspended
+		}
+	case driver.PoolScanStateFinished:
+		scan.State = ScanStateFinished
+	case driver.PoolScanStateCanceled:
+		scan.State = ScanStateCanceled
+	}
+
+	if scan.State == ScanStateFinished || scan.State == ScanStateCanceled {
+		end := time.Unix(int64(s.EndTime), 0)
+		scan.EndTime = &end
+	}
+
+	// Same rate calculation as zpool status: issued bytes of this pass over
+	// the time the pass was not paused.
+	if scan.State == ScanStateScanning {
+		elapsed := now.Unix() - int64(s.PassStart) - int64(s.PassSpentPaused)
+		if elapsed < 1 {
+			elapsed = 1
+		}
+		scan.Rate = s.PassIssued / uint64(elapsed)
+	}
+
+	return scan
+}
+
+// StartScrub starts a scrub on a pool, or resumes a paused one (`zpool scrub`).
 func (c *Client) StartScrub(ctx context.Context, poolName string) error {
 	if c.d == nil {
 		return fmt.Errorf("client is closed")
 	}
 
-	// TODO: Implement scrub start via driver
-	return fmt.Errorf("StartScrub not implemented yet")
+	return c.d.ScrubPool(ctx, poolName, driver.ScrubStart)
 }
 
-// StopScrub stops a running scrub operation on a pool
+// PauseScrub pauses a running scrub. StartScrub resumes it.
+func (c *Client) PauseScrub(ctx context.Context, poolName string) error {
+	if c.d == nil {
+		return fmt.Errorf("client is closed")
+	}
+	return c.d.ScrubPool(ctx, poolName, driver.ScrubPause)
+}
+
+// StopScrub cancels a running or paused scrub (`zpool scrub -s`).
 func (c *Client) StopScrub(ctx context.Context, poolName string) error {
 	if c.d == nil {
 		return fmt.Errorf("client is closed")
 	}
 
-	// TODO: Implement scrub stop via driver
-	return fmt.Errorf("StopScrub not implemented yet")
+	return c.d.ScrubPool(ctx, poolName, driver.ScrubStop)
 }
 
 // ImportOptions represents options for pool import operations
@@ -449,6 +588,10 @@ type ImportOptions struct {
 	AltRoot   string // Alternative root directory
 	Force     bool   // Force import even if pool appears active
 	Destroyed bool   // Import destroyed pool
+
+	// SearchPaths lists directories to scan for pool devices (like
+	// `zpool import -d`). When empty the default device directories are scanned.
+	SearchPaths []string
 }
 
 // ExportOptions represents options for pool export operations
@@ -464,10 +607,11 @@ func (c *Client) Import(ctx context.Context, poolName string, opts ImportOptions
 	}
 
 	return c.d.ImportPool(ctx, poolName, driver.ImportOptions{
-		NewName:   opts.NewName,
-		AltRoot:   opts.AltRoot,
-		Force:     opts.Force,
-		Destroyed: opts.Destroyed,
+		NewName:     opts.NewName,
+		AltRoot:     opts.AltRoot,
+		Force:       opts.Force,
+		Destroyed:   opts.Destroyed,
+		SearchPaths: opts.SearchPaths,
 	})
 }
 

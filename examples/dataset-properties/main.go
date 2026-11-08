@@ -58,15 +58,15 @@ func main() {
 
 	// Test specific property getters
 	fmt.Println("\nSpecific property tests:")
-	
+
 	if used, err := client.GetStringProperty(ctx, datasetName, "used"); err == nil {
 		fmt.Printf("Used (string): %s\n", used)
 	}
-	
+
 	if avail, err := client.GetStringProperty(ctx, datasetName, "avail"); err == nil {
 		fmt.Printf("Available (string): %s\n", avail)
 	}
-	
+
 	if mountpoint, err := client.GetStringProperty(ctx, datasetName, "mountpoint"); err == nil {
 		fmt.Printf("Mountpoint (string): %s\n", mountpoint)
 	}

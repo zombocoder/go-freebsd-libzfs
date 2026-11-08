@@ -32,7 +32,7 @@ func main() {
 
 	operation := os.Args[1]
 	datasetName := os.Args[2]
-	
+
 	ctx := context.Background()
 
 	client, err := zfs.New(ctx)
@@ -95,10 +95,10 @@ func destroyDataset(ctx context.Context, client *zfs.Client, datasetName string,
 	}
 	fmt.Println("This operation is IRREVERSIBLE and will DELETE ALL DATA!")
 	fmt.Print("Type 'DELETE' to confirm: ")
-	
+
 	var confirmation string
 	fmt.Scanln(&confirmation)
-	
+
 	if confirmation != "DELETE" {
 		return fmt.Errorf("operation cancelled - confirmation not provided")
 	}
@@ -127,7 +127,7 @@ func showDatasetInfo(ctx context.Context, client *zfs.Client, datasetName string
 	fmt.Printf("Is Volume: %v\n", dataset.IsVolume())
 
 	// Get properties
-	props, err := client.GetProperties(ctx, datasetName, "used", "avail", "mountpoint", 
+	props, err := client.GetProperties(ctx, datasetName, "used", "avail", "mountpoint",
 		"compression", "compressratio", "quota", "reservation")
 	if err == nil && len(props) > 0 {
 		fmt.Printf("\nProperties:\n")
@@ -141,15 +141,15 @@ func showDatasetInfo(ctx context.Context, client *zfs.Client, datasetName string
 	if dataset.IsFilesystem() {
 		fmt.Printf("\nFilesystem-specific info:\n")
 		fmt.Printf("-------------------------\n")
-		
+
 		if mountpoint, err := client.GetStringProperty(ctx, datasetName, "mountpoint"); err == nil {
 			fmt.Printf("Mountpoint: %s\n", mountpoint)
 		}
-		
+
 		if canmount, err := client.GetStringProperty(ctx, datasetName, "canmount"); err == nil {
 			fmt.Printf("Can mount: %s\n", canmount)
 		}
-		
+
 		if mounted, err := client.GetStringProperty(ctx, datasetName, "mounted"); err == nil {
 			fmt.Printf("Currently mounted: %s\n", mounted)
 		}
@@ -159,11 +159,11 @@ func showDatasetInfo(ctx context.Context, client *zfs.Client, datasetName string
 	if dataset.IsVolume() {
 		fmt.Printf("\nVolume-specific info:\n")
 		fmt.Printf("---------------------\n")
-		
+
 		if volsize, err := client.GetStringProperty(ctx, datasetName, "volsize"); err == nil {
 			fmt.Printf("Volume size: %s\n", volsize)
 		}
-		
+
 		if volblocksize, err := client.GetStringProperty(ctx, datasetName, "volblocksize"); err == nil {
 			fmt.Printf("Volume block size: %s\n", volblocksize)
 		}

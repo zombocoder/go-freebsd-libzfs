@@ -27,7 +27,7 @@ func main() {
 
 	operation := os.Args[1]
 	poolName := os.Args[2]
-	
+
 	ctx := context.Background()
 
 	client, err := zpool.New(ctx)
@@ -88,7 +88,7 @@ func showPoolStatus(ctx context.Context, client *zpool.Client, poolName string) 
 
 func exportPool(ctx context.Context, client *zpool.Client, poolName string, force bool) error {
 	fmt.Printf("Exporting pool: %s (force: %v)\n", poolName, force)
-	
+
 	// Confirm the operation
 	if !force {
 		fmt.Print("Are you sure you want to export this pool? (y/N): ")
@@ -121,10 +121,10 @@ func destroyPool(ctx context.Context, client *zpool.Client, poolName string) err
 	fmt.Printf("WARNING: You are about to DESTROY pool '%s'\n", poolName)
 	fmt.Println("This operation is IRREVERSIBLE and will DELETE ALL DATA!")
 	fmt.Print("Type 'DELETE' to confirm: ")
-	
+
 	var confirmation string
 	fmt.Scanln(&confirmation)
-	
+
 	if confirmation != "DELETE" {
 		return fmt.Errorf("operation cancelled - confirmation not provided")
 	}

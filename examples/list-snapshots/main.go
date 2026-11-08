@@ -52,7 +52,7 @@ func main() {
 		}
 
 		fmt.Printf("%-50s | Parent: %s\n", snapshot.Name, snapshot.Parent)
-		fmt.Printf("  Snapshot Name: %-30s | Type: %s | GUID: %d\n", 
+		fmt.Printf("  Snapshot Name: %-30s | Type: %s | GUID: %d\n",
 			snapName, snapshot.Type, snapshot.GUID)
 
 		// Try to get some properties for the snapshot

@@ -1,0 +1,77 @@
+name: Bug report
+description: Something in the library does not work as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please check existing issues first.
+        For security problems, use [private reporting](https://github.com/zombocoder/go-freebsd-libzfs/security/advisories/new) instead.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: A small Go program or the exact API calls, and the pool/dataset layout they need (e.g. created from files with `truncate` + `zpool create`).
+      render: go
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Error messages and relevant output
+      description: Error values, panics, and if useful `zpool status` / `zfs list` output. Remove anything you consider private.
+      render: shell
+
+  - type: input
+    id: freebsd
+    attributes:
+      label: FreeBSD version
+      description: Output of `freebsd-version -ku`
+      placeholder: "15.1-RELEASE-p6 15.1-RELEASE-p6"
+    validations:
+      required: true
+
+  - type: input
+    id: openzfs
+    attributes:
+      label: OpenZFS version
+      description: Output of `zfs version`
+      placeholder: "zfs-2.4.2-1-FreeBSD_g6330a45b0 / zfs-kmod-2.4.2-1-FreeBSD_g6330a45b0"
+    validations:
+      required: true
+
+  - type: input
+    id: go
+    attributes:
+      label: Go version
+      description: Output of `go version`
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: Library version
+      description: Module version or commit hash you are using
+    validations:
+      required: true
+
+  - type: dropdown
+    id: root
+    attributes:
+      label: Running as root?
+      options:
+        - "yes"
+        - "no"
+    validations:
+      required: true

@@ -179,24 +179,6 @@ func mapPoolState(state int) string {
 	}
 }
 
-// Helper function to map driver pool health to string
-func mapPoolHealth(status int) string {
-	switch status {
-	case PoolStatusCorruptCache:
-		return "DEGRADED"
-	case PoolStatusMissingDevR:
-		return "DEGRADED"
-	case PoolStatusMissingDevNr:
-		return "DEGRADED"
-	case PoolStatusCorruptLabelR:
-		return "DEGRADED"
-	case PoolStatusCorruptLabelNr:
-		return "DEGRADED"
-	default:
-		return "ONLINE" // Default to ONLINE for unknown status
-	}
-}
-
 // Helper function to safely open a dataset handle with type detection
 func (d *libzfsDriver) openDatasetHandle(datasetName string) (*C.zfs_handle_t, error) {
 	cDatasetName := C.CString(datasetName)

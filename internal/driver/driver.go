@@ -53,6 +53,7 @@ const (
 	PropSourceDefault
 	PropSourceTemporary
 	PropSourceReceived
+	PropSourceNone // read-only or statistic property, no settable source
 )
 
 func (s PropSource) String() string {
@@ -67,6 +68,8 @@ func (s PropSource) String() string {
 		return "temporary"
 	case PropSourceReceived:
 		return "received"
+	case PropSourceNone:
+		return "none"
 	default:
 		return "unknown"
 	}
@@ -86,7 +89,82 @@ type ImportOptions struct {
 	AltRoot   string // Alternative root directory
 	Force     bool   // Force import even if pool appears active
 	Destroyed bool   // Import destroyed pool
+
+	// SearchPaths lists directories to scan for pool devices. When empty the
+	// default device directories (e.g. /dev) are scanned.
+	SearchPaths []string
 }
+
+// DiscoverOptions controls the search for importable pools
+type DiscoverOptions struct {
+	SearchPaths      []string // Directories to scan; default device directories when empty
+	IncludeDestroyed bool     // Also report destroyed pools
+	PoolName         string   // Only report pools with this name when set
+}
+
+// ImportablePool describes a pool found on disk that is not currently imported
+type ImportablePool struct {
+	Name        string
+	GUID        uint64
+	State       string   // e.g. "EXPORTED", "DESTROYED"
+	Health      string   // e.g. "ONLINE", "DEGRADED"
+	DevicePaths []string // Leaf devices (data, cache and spares)
+}
+
+// VdevStatus describes one vdev and its subtree, as in `zpool status`
+type VdevStatus struct {
+	Name           string // Display name (zpool_vdev_name)
+	Type           string // e.g. "root", "mirror", "raidz", "disk", "file"
+	Path           string // Device path for leaf vdevs
+	GUID           uint64
+	State          string // e.g. "ONLINE", "DEGRADED", "OFFLINE", "AVAIL"
+	Alloc          uint64
+	Space          uint64
+	DSpace         uint64
+	ReadErrors     uint64
+	WriteErrors    uint64
+	ChecksumErrors uint64
+	Children       []VdevStatus
+}
+
+// ScanStats mirrors pool_scan_stat_t. Times are Unix seconds.
+type ScanStats struct {
+	Function        uint64 // PoolScan* constant
+	State           uint64 // PoolScanState* constant
+	StartTime       uint64
+	EndTime         uint64
+	ToExamine       uint64
+	Examined        uint64
+	Skipped         uint64
+	Processed       uint64
+	Errors          uint64
+	PassExamined    uint64
+	PassStart       uint64
+	PassPausedAt    uint64 // non-zero while a scrub is paused
+	PassSpentPaused uint64 // seconds the current pass spent paused
+	PassIssued      uint64
+	Issued          uint64
+}
+
+// PoolStatus is the detailed status of an imported pool
+type PoolStatus struct {
+	Root       VdevStatus
+	Spares     []VdevStatus
+	Cache      []VdevStatus
+	DataErrors uint64
+	Scan       *ScanStats // nil when the pool has no scan statistics
+	Problem    string     // zpool_status_t name without the ZPOOL_STATUS_ prefix
+	MsgID      string     // ZFS-8000-* message id, empty if none
+}
+
+// ScrubCommand selects the scrub action for ScrubPool
+type ScrubCommand int
+
+const (
+	ScrubStart ScrubCommand = iota // start, or resume a paused scrub
+	ScrubPause
+	ScrubStop
+)
 
 // ExportOptions represents options for pool export
 type ExportOptions struct {
@@ -139,6 +217,9 @@ type Driver interface {
 	// Pool operations
 	ListPools(ctx context.Context) ([]PoolInfo, error)
 	GetPoolProps(ctx context.Context, poolName string, propNames []string) (map[string]PropertyInfo, error)
+	DiscoverPools(ctx context.Context, opts DiscoverOptions) ([]ImportablePool, error)
+	GetPoolStatus(ctx context.Context, poolName string) (*PoolStatus, error)
+	ScrubPool(ctx context.Context, poolName string, cmd ScrubCommand) error
 	ImportPool(ctx context.Context, poolName string, opts ImportOptions) error
 	ExportPool(ctx context.Context, poolName string, opts ExportOptions) error
 	CreatePool(ctx context.Context, poolName string, vdevs []string, opts CreateOptions) error

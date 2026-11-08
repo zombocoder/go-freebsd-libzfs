@@ -54,15 +54,15 @@ func main() {
 
 	// Test specific property getters
 	fmt.Println("\nSpecific property tests:")
-	
+
 	if size, err := client.GetStringProperty(ctx, poolName, "size"); err == nil {
 		fmt.Printf("Size (string): %s\n", size)
 	}
-	
+
 	if free, err := client.GetStringProperty(ctx, poolName, "free"); err == nil {
 		fmt.Printf("Free (string): %s\n", free)
 	}
-	
+
 	if allocated, err := client.GetStringProperty(ctx, poolName, "allocated"); err == nil {
 		fmt.Printf("Allocated (string): %s\n", allocated)
 	}

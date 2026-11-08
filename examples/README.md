@@ -4,80 +4,68 @@ This directory contains example programs demonstrating the FreeBSD Go ZFS librar
 
 ## Prerequisites
 
-- FreeBSD 14.3+ with OpenZFS
+- FreeBSD 14 or 15 with OpenZFS 2.2+
 - Go 1.22+
 - libzfs and libnvpair libraries
 - Root privileges (for ZFS operations)
 
 ## Running Examples
 
-All examples require root privileges to access ZFS:
+Read-only examples (listing, properties, status) work as a regular user.
+Examples that change pools or datasets (create, destroy, import, export,
+scrub, snapshots, clones) require root:
 
 ```bash
-sudo go run examples/basic/main.go
+go run ./examples/basic
+doas go run ./examples/scrub start zroot
 ```
 
 ## Available Examples
 
-### 1. Basic (`examples/basic/`)
+### Read-only
 
-Comprehensive test of all major library features:
+| Example | What it shows | Usage |
+|---|---|---|
+| `basic` | Version detection, capabilities, pools, datasets, snapshots | `go run ./examples/basic` |
+| `pool-properties` | All properties of a pool with their sources | `go run ./examples/pool-properties zroot` |
+| `dataset-properties` | All properties of a dataset with their sources | `go run ./examples/dataset-properties zroot/home` |
+| `list-snapshots` | Snapshots grouped by dataset | `go run ./examples/list-snapshots [zroot/home]` |
+| `pool-status` | `zpool status`-style health report: status condition, scrub/resilver progress, vdev tree with READ/WRITE/CKSUM errors, spares, cache, data errors. Exits 1 if any pool is unhealthy, so it can be used for monitoring | `go run ./examples/pool-status [pool...]` |
+| `error-handling` | Typed errors and error predicates | `go run ./examples/error-handling` |
 
-- Version detection and capability probing
-- Pool listing and properties
-- Dataset listing and properties
-- Snapshot listing
+### Pool management (root)
 
-```bash
-sudo go run examples/basic/main.go
-```
+| Example | What it shows | Usage |
+|---|---|---|
+| `pool-import` | Discover pools available for import (`zpool import`) and import them, optionally from a directory, under a new name, with an alternate root, forced, or destroyed pools | `pool-import [-d dir]... [-D]` to list; `pool-import [-d dir]... [-D] [-f] [-R altroot] <pool> [newname]` to import |
+| `scrub` | Start, pause, resume, stop and monitor scrubs | `scrub start [-w] <pool>`, `scrub pause <pool>`, `scrub stop <pool>`, `scrub status <pool>` |
+| `pool-operations` | Status, export, import and destroy (asks for confirmation) | `pool-operations status\|export\|export-force\|import\|destroy <pool>` |
 
-### 2. Pool Properties (`examples/pool-properties/`)
+### Dataset management (root)
 
-Detailed pool property inspection:
+| Example | What it shows | Usage |
+|---|---|---|
+| `dataset-operations` | Create filesystems and volumes, destroy, show info | `dataset-operations create-fs zroot/test`, `create-vol zroot/vol1 1G`, `destroy[-recursive] <ds>`, `info <ds>` |
+| `snapshot-operations` | Create (recursive), destroy, roll back and list snapshots | `snapshot-operations create zroot/test@backup`, `rollback zroot/test zroot/test@backup`, `list [ds]` |
+| `clone-operations` | Create, promote, inspect and destroy clones. Works on the hard-coded `tank/test@snap1` / `tank/test-clone`; edit the names before running | `clone-operations` |
 
-```bash
-sudo go run examples/pool-properties/main.go <pool-name>
-```
+### Trying the pool examples safely
 
-Example:
-
-```bash
-sudo go run examples/pool-properties/main.go zroot
-```
-
-### 3. Dataset Properties (`examples/dataset-properties/`)
-
-Detailed dataset property inspection:
-
-```bash
-sudo go run examples/dataset-properties/main.go <dataset-name>
-```
-
-Example:
+`pool-import` and `scrub` are easiest to try on a throwaway pool backed by files:
 
 ```bash
-sudo go run examples/dataset-properties/main.go zroot/home
-```
+mkdir -p /var/tmp/demo
+truncate -s 128m /var/tmp/demo/d0 /var/tmp/demo/d1
+doas zpool create demo mirror /var/tmp/demo/d0 /var/tmp/demo/d1
 
-### 4. List Snapshots (`examples/list-snapshots/`)
+doas go run ./examples/scrub start -w demo
+go run ./examples/pool-status demo
 
-Comprehensive snapshot listing with grouping:
+doas zpool export demo
+go run ./examples/pool-import -d /var/tmp/demo        # lists "demo"
+doas go run ./examples/pool-import -d /var/tmp/demo demo
 
-```bash
-# List all snapshots
-sudo go run examples/list-snapshots/main.go
-
-# List snapshots for specific parent dataset
-sudo go run examples/list-snapshots/main.go zroot/home
-```
-
-### 5. Error Handling (`examples/error-handling/`)
-
-Demonstrates proper error handling patterns:
-
-```bash
-sudo go run examples/error-handling/main.go
+doas zpool destroy demo && rm -r /var/tmp/demo
 ```
 
 ## Building Examples
@@ -119,7 +107,7 @@ If no ZFS pools/datasets exist, the examples will still demonstrate the API func
 Error: permission denied
 ```
 
-**Solution:** Run with `sudo` - ZFS operations require root privileges.
+**Solution:** Run with `doas` (or `sudo`) - operations that modify pools or datasets require root privileges.
 
 ### libzfs Not Found
 
@@ -127,7 +115,7 @@ Error: permission denied
 Error: failed to initialize libzfs driver
 ```
 
-**Solution:** Ensure libzfs is installed: `pkg install openzfs`
+**Solution:** libzfs is part of the FreeBSD base system; make sure the `zfs` kernel module is loaded (`kldload zfs`) and that you are running on FreeBSD 14 or newer.
 
 ### No Pools Found
 

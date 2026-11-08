@@ -80,6 +80,18 @@ func (d *ioctlDriver) GetDatasetProps(ctx context.Context, datasetName string, p
 	return nil, fmt.Errorf("ioctl dataset properties not implemented yet")
 }
 
+func (d *ioctlDriver) GetPoolStatus(ctx context.Context, poolName string) (*PoolStatus, error) {
+	return nil, fmt.Errorf("ioctl GetPoolStatus not implemented yet")
+}
+
+func (d *ioctlDriver) ScrubPool(ctx context.Context, poolName string, cmd ScrubCommand) error {
+	return fmt.Errorf("ioctl ScrubPool not implemented yet")
+}
+
+func (d *ioctlDriver) DiscoverPools(ctx context.Context, opts DiscoverOptions) ([]ImportablePool, error) {
+	return nil, fmt.Errorf("ioctl DiscoverPools not implemented yet")
+}
+
 func (d *ioctlDriver) ImportPool(ctx context.Context, poolName string, opts ImportOptions) error {
 	return fmt.Errorf("ioctl ImportPool not implemented yet")
 }

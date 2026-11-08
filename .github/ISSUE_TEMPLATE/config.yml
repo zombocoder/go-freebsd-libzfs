@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/zombocoder/go-freebsd-libzfs/security/advisories/new
+    about: Please report security problems privately, not as a public issue.
+  - name: OpenZFS issues
+    url: https://github.com/openzfs/zfs/issues
+    about: Bugs in ZFS itself (kernel module, libzfs, zfs/zpool commands) belong upstream.
