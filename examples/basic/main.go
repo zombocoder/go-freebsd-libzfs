@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/zombocoder/go-freebsd-libzfs/version"
-	"github.com/zombocoder/go-freebsd-libzfs/zpool"
 	"github.com/zombocoder/go-freebsd-libzfs/zfs"
+	"github.com/zombocoder/go-freebsd-libzfs/zpool"
 )
 
 func main() {
@@ -34,7 +34,7 @@ func main() {
 	if err != nil {
 		log.Printf("Capability probing failed: %v", err)
 	} else {
-		fmt.Printf("Capabilities - Pools: %v, Datasets: %v, Snapshots: %v\n", 
+		fmt.Printf("Capabilities - Pools: %v, Datasets: %v, Snapshots: %v\n",
 			caps.Pools, caps.Datasets, caps.Snapshots)
 	}
 
@@ -53,9 +53,9 @@ func main() {
 	} else {
 		fmt.Printf("Found %d pools:\n", len(pools))
 		for _, pool := range pools {
-			fmt.Printf("  - %s (GUID: %d, Health: %s, State: %s)\n", 
+			fmt.Printf("  - %s (GUID: %d, Health: %s, State: %s)\n",
 				pool.Name, pool.GUID, pool.Health, pool.State)
-			
+
 			// Try to get some properties for the first pool
 			if len(pools) > 0 && pool.Name != "" {
 				fmt.Printf("    Properties for %s:\n", pool.Name)
@@ -86,9 +86,9 @@ func main() {
 	} else {
 		fmt.Printf("Found %d datasets (non-recursive):\n", len(datasets))
 		for i, dataset := range datasets {
-			fmt.Printf("  - %s (Type: %s, GUID: %d)\n", 
+			fmt.Printf("  - %s (Type: %s, GUID: %d)\n",
 				dataset.Name, dataset.Type, dataset.GUID)
-			
+
 			// Only show properties for first few datasets to avoid spam
 			if i < 3 && dataset.Name != "" {
 				fmt.Printf("    Properties for %s:\n", dataset.Name)

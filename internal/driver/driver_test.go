@@ -38,6 +38,7 @@ func TestPropSource_String(t *testing.T) {
 		{PropSourceDefault, "default"},
 		{PropSourceTemporary, "temporary"},
 		{PropSourceReceived, "received"},
+		{PropSourceNone, "none"},
 		{PropSource(999), "unknown"},
 	}
 

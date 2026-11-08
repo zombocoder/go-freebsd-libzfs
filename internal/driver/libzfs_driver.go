@@ -27,6 +27,7 @@ extern int go_dataset_iter_callback(zfs_handle_t *, void *);
 // Pool state and health
 extern int go_zpool_get_state(zpool_handle_t* zhp);
 extern int go_zpool_get_status(zpool_handle_t* zhp, char** msgid);
+extern int go_zpool_health(zpool_handle_t *zhp, char *buf, size_t len);
 
 // Property constants
 extern int go_get_zpool_prop_size();
@@ -51,8 +52,8 @@ extern int go_get_zfs_prop_mountpoint();
 extern int go_get_zfs_prop_compression();
 
 // Property retrieval
-extern int go_get_zpool_property(zpool_handle_t* zhp, int prop, char* buf, size_t len);
-extern int go_get_zfs_property(zfs_handle_t* zhp, int prop, char* buf, size_t len);
+extern int go_get_zpool_property(zpool_handle_t* zhp, int prop, char* buf, size_t len, int* src_out);
+extern int go_get_zfs_property(zfs_handle_t* zhp, int prop, char* buf, size_t len, int* src_out);
 
 // Pool configuration and status
 extern void* go_zpool_get_config(zpool_handle_t* zhp, void** oldconfig);
@@ -64,28 +65,18 @@ extern int go_nvlist_lookup_nvlist_array(void* nvl, char* name, void*** val, uns
 extern int go_nvlist_lookup_string(void* nvl, char* name, char** val);
 extern int go_nvlist_lookup_uint64(void* nvl, char* name, uint64_t* val);
 
-// Scan status structure
-struct scan_info {
-    uint64_t func;
-    uint64_t state;
-    uint64_t start_time;
-    uint64_t end_time;
-    uint64_t examined;
-    uint64_t to_examine;
-    uint64_t processed;
-    uint64_t to_process;
-    uint64_t errors;
-    uint64_t pass_examined;
-    uint64_t pass_start;
-};
-
-extern int go_get_scan_status(void* nvroot, struct scan_info* scan);
 
 // Pool operations
-extern int go_zpool_import(libzfs_handle_t* hdl, void* config, char* newname, char* altroot);
 extern int go_zpool_export(zpool_handle_t* zhp, int force, char* message);
 extern int go_zpool_export_force(zpool_handle_t* zhp);
-extern void* go_zpool_find_import(libzfs_handle_t* hdl, int argc, char** argv, int do_destroyed, char** poolname);
+extern nvlist_t *go_zpool_search(libzfs_handle_t *hdl, const char *poolname,
+    char **paths, int npaths, char *errbuf, size_t errlen, int *err);
+extern int go_import_config_summary(nvlist_t *config, const char **name, uint64_t *guid,
+    uint64_t *state, const char **state_name, const char **health);
+extern int go_import_config_device_paths(nvlist_t *config, const char **out, int max);
+extern int go_zpool_import(libzfs_handle_t *hdl, const char *poolname,
+    char **paths, int npaths, const char *newname, const char *altroot,
+    int flags, int destroyed, char *errbuf, size_t errlen);
 extern int go_zpool_create(libzfs_handle_t* hdl, char* poolname, void* nvroot, void* props, void* fsprops);
 extern int go_zpool_destroy(zpool_handle_t* zhp, char* message);
 
@@ -167,9 +158,12 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 
 	// Import the cgo package to link its C code
 	_ "github.com/zombocoder/go-freebsd-libzfs/internal/cgo"
@@ -217,9 +211,33 @@ func (d *libzfsDriver) RuntimeInfo(ctx context.Context) (string, string, string,
 		return "", "", "", fmt.Errorf("driver closed")
 	}
 
-	// TODO: Extract actual version info from libzfs
-	// For now, return static info indicating libzfs backend
-	return "libzfs", "OpenZFS 2.x", "FreeBSD", nil
+	zfsVer := C.GoString(C.zfs_version_userland())
+
+	kernel := "FreeBSD"
+	var uts unix.Utsname
+	if err := unix.Uname(&uts); err == nil {
+		kernel = unix.ByteSliceToString(uts.Sysname[:]) + " " + unix.ByteSliceToString(uts.Release[:])
+	}
+
+	return "libzfs", zfsVer, kernel, nil
+}
+
+// mapPropSource converts a zprop_source_t bit value to a PropSource.
+func mapPropSource(src C.int) PropSource {
+	switch src {
+	case C.ZPROP_SRC_DEFAULT:
+		return PropSourceDefault
+	case C.ZPROP_SRC_TEMPORARY:
+		return PropSourceTemporary
+	case C.ZPROP_SRC_LOCAL:
+		return PropSourceLocal
+	case C.ZPROP_SRC_INHERITED:
+		return PropSourceInherited
+	case C.ZPROP_SRC_RECEIVED:
+		return PropSourceReceived
+	default:
+		return PropSourceNone
+	}
 }
 
 // Pool iteration callback data
@@ -237,7 +255,11 @@ func go_pool_iter_callback(zhp *C.zpool_handle_t, data unsafe.Pointer) C.int {
 
 	// Get pool state and health
 	state := mapPoolState(int(C.go_zpool_get_state(zhp)))
-	health := mapPoolHealth(int(C.go_zpool_get_status(zhp, nil)))
+	health := "UNKNOWN"
+	var healthBuf [64]C.char
+	if C.go_zpool_health(zhp, &healthBuf[0], C.size_t(len(healthBuf))) == 0 {
+		health = C.GoString(&healthBuf[0])
+	}
 
 	pool := PoolInfo{
 		Name:   name,
@@ -320,7 +342,8 @@ func (d *libzfsDriver) GetPoolProps(ctx context.Context, poolName string, propNa
 		if propFunc, exists := propMap[propName]; exists {
 			propValue := propFunc()
 			buf := make([]byte, 1024)
-			ret := C.go_get_zpool_property(zhp, propValue, (*C.char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
+			var src C.int
+			ret := C.go_get_zpool_property(zhp, propValue, (*C.char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)), &src)
 
 			if ret == 0 {
 				// Successfully retrieved property
@@ -328,7 +351,7 @@ func (d *libzfsDriver) GetPoolProps(ctx context.Context, poolName string, propNa
 				properties[propName] = PropertyInfo{
 					Name:     propName,
 					Value:    value,
-					Source:   PropSourceLocal, // TODO: Get actual source
+					Source:   mapPropSource(src),
 					Received: false,
 				}
 			}
@@ -380,33 +403,13 @@ func mapDatasetType(zfsType int) DatasetType {
 	}
 }
 
+// ListDatasets returns root datasets, or every dataset (including snapshots)
+// when recursive is true.
 func (d *libzfsDriver) ListDatasets(ctx context.Context, recursive bool) ([]DatasetInfo, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	if d.h == nil {
-		return nil, fmt.Errorf("driver closed")
-	}
-
-	iterData := &datasetIterData{}
-
-	// Call C function to iterate datasets
-	ret := C.go_iter_datasets(d.h, (*[0]byte)(C.go_dataset_iter_callback), unsafe.Pointer(iterData))
-	if ret != 0 {
-		errno := C.go_libzfs_errno(d.h)
-		desc := C.GoString(C.go_libzfs_error_description(d.h))
-		return nil, fmt.Errorf("failed to iterate datasets (errno %d): %s", errno, desc)
-	}
-
-	if iterData.err != nil {
-		return nil, iterData.err
-	}
-
-	return iterData.datasets, nil
+	return d.ListDatasetsByType(ctx, nil, recursive)
 }
 
 func (d *libzfsDriver) ListDatasetsInPool(ctx context.Context, poolName string, recursive bool) ([]DatasetInfo, error) {
-	// Get all datasets and filter by pool name
 	allDatasets, err := d.ListDatasets(ctx, recursive)
 	if err != nil {
 		return nil, err
@@ -414,8 +417,10 @@ func (d *libzfsDriver) ListDatasetsInPool(ctx context.Context, poolName string, 
 
 	var poolDatasets []DatasetInfo
 	for _, dataset := range allDatasets {
-		// Check if dataset belongs to the specified pool
-		if strings.HasPrefix(dataset.Name, poolName+"/") || dataset.Name == poolName {
+		if dataset.Name == poolName ||
+			strings.HasPrefix(dataset.Name, poolName+"/") ||
+			strings.HasPrefix(dataset.Name, poolName+"@") ||
+			strings.HasPrefix(dataset.Name, poolName+"#") {
 			poolDatasets = append(poolDatasets, dataset)
 		}
 	}
@@ -423,6 +428,9 @@ func (d *libzfsDriver) ListDatasetsInPool(ctx context.Context, poolName string, 
 	return poolDatasets, nil
 }
 
+// ListDatasetsByType lists datasets sorted by name. Without recursive only the
+// root dataset of each pool is returned; with recursive all filesystems,
+// volumes and snapshots are returned. dsType optionally filters by type.
 func (d *libzfsDriver) ListDatasetsByType(ctx context.Context, dsType *DatasetType, recursive bool) ([]DatasetInfo, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -433,43 +441,38 @@ func (d *libzfsDriver) ListDatasetsByType(ctx context.Context, dsType *DatasetTy
 
 	iterData := &datasetIterData{}
 
-	// Use comprehensive iteration to get all datasets including snapshots
-	ret := C.go_iter_all_datasets(d.h, (*[0]byte)(C.go_dataset_iter_callback), unsafe.Pointer(iterData))
+	var ret C.int
+	if recursive {
+		ret = C.go_iter_all_datasets(d.h, (*[0]byte)(C.go_dataset_iter_callback), unsafe.Pointer(iterData))
+	} else {
+		ret = C.go_iter_datasets(d.h, (*[0]byte)(C.go_dataset_iter_callback), unsafe.Pointer(iterData))
+	}
 	if ret != 0 {
 		errno := C.go_libzfs_errno(d.h)
 		desc := C.GoString(C.go_libzfs_error_description(d.h))
-		return nil, fmt.Errorf("failed to iterate all datasets (errno %d): %s", errno, desc)
+		return nil, fmt.Errorf("failed to iterate datasets (errno %d): %s", errno, desc)
 	}
 
 	if iterData.err != nil {
 		return nil, iterData.err
 	}
 
-	// Deduplicate datasets by name (since snapshots might be found via multiple paths)
-	datasetMap := make(map[string]DatasetInfo)
+	// Deduplicate by name and apply the optional type filter.
+	seen := make(map[string]struct{}, len(iterData.datasets))
+	result := make([]DatasetInfo, 0, len(iterData.datasets))
 	for _, dataset := range iterData.datasets {
-		datasetMap[dataset.Name] = dataset
-	}
-
-	// Convert back to slice
-	var uniqueDatasets []DatasetInfo
-	for _, dataset := range datasetMap {
-		uniqueDatasets = append(uniqueDatasets, dataset)
-	}
-
-	// Filter by type if specified
-	if dsType == nil {
-		return uniqueDatasets, nil
-	}
-
-	var filteredDatasets []DatasetInfo
-	for _, dataset := range uniqueDatasets {
-		if dataset.Type == *dsType {
-			filteredDatasets = append(filteredDatasets, dataset)
+		if _, dup := seen[dataset.Name]; dup {
+			continue
 		}
+		seen[dataset.Name] = struct{}{}
+		if dsType != nil && dataset.Type != *dsType {
+			continue
+		}
+		result = append(result, dataset)
 	}
 
-	return filteredDatasets, nil
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result, nil
 }
 
 func (d *libzfsDriver) GetDatasetProps(ctx context.Context, datasetName string, propNames []string) (map[string]PropertyInfo, error) {
@@ -519,7 +522,8 @@ func (d *libzfsDriver) GetDatasetProps(ctx context.Context, datasetName string, 
 		if propFunc, exists := propMap[propName]; exists {
 			propValue := propFunc()
 			buf := make([]byte, 1024)
-			ret := C.go_get_zfs_property(zhp, propValue, (*C.char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
+			var src C.int
+			ret := C.go_get_zfs_property(zhp, propValue, (*C.char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)), &src)
 
 			if ret == 0 {
 				// Successfully retrieved property
@@ -527,7 +531,7 @@ func (d *libzfsDriver) GetDatasetProps(ctx context.Context, datasetName string, 
 				properties[propName] = PropertyInfo{
 					Name:     propName,
 					Value:    value,
-					Source:   PropSourceLocal, // TODO: Get actual source
+					Source:   mapPropSource(src),
 					Received: false,
 				}
 			}
@@ -535,6 +539,94 @@ func (d *libzfsDriver) GetDatasetProps(ctx context.Context, datasetName string, 
 	}
 
 	return properties, nil
+}
+
+// cStringArray copies strs into a C-allocated char* array. It returns nil for
+// an empty slice. The returned function frees all memory.
+func cStringArray(strs []string) (**C.char, func()) {
+	if len(strs) == 0 {
+		return nil, func() {}
+	}
+	arr := (**C.char)(C.calloc(C.size_t(len(strs)), C.size_t(unsafe.Sizeof((*C.char)(nil)))))
+	elems := unsafe.Slice(arr, len(strs))
+	for i, s := range strs {
+		elems[i] = C.CString(s)
+	}
+	return arr, func() {
+		for _, e := range elems {
+			C.free(unsafe.Pointer(e))
+		}
+		C.free(unsafe.Pointer(arr))
+	}
+}
+
+// DiscoverPools scans for pools that are not imported, like `zpool import`
+// without arguments. Results are sorted by name.
+func (d *libzfsDriver) DiscoverPools(ctx context.Context, opts DiscoverOptions) ([]ImportablePool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.h == nil {
+		return nil, fmt.Errorf("driver closed")
+	}
+
+	var poolNameC *C.char
+	if opts.PoolName != "" {
+		poolNameC = C.CString(opts.PoolName)
+		defer C.free(unsafe.Pointer(poolNameC))
+	}
+	pathsC, freePaths := cStringArray(opts.SearchPaths)
+	defer freePaths()
+
+	errBuf := make([]byte, 1024)
+	var searchErr C.int
+	pools := C.go_zpool_search(d.h, poolNameC, pathsC, C.int(len(opts.SearchPaths)),
+		(*C.char)(unsafe.Pointer(&errBuf[0])), C.size_t(len(errBuf)), &searchErr)
+	if pools == nil {
+		if searchErr != 0 {
+			return nil, fmt.Errorf("pool discovery failed: %s", C.GoString((*C.char)(unsafe.Pointer(&errBuf[0]))))
+		}
+		return []ImportablePool{}, nil
+	}
+	defer C.nvlist_free(pools)
+
+	result := []ImportablePool{}
+	for elem := C.nvlist_next_nvpair(pools, nil); elem != nil; elem = C.nvlist_next_nvpair(pools, elem) {
+		var config *C.nvlist_t
+		if C.nvpair_value_nvlist(elem, &config) != 0 {
+			continue
+		}
+
+		var name, stateName, health *C.char
+		var guid, state C.uint64_t
+		if C.go_import_config_summary(config, &name, &guid, &state, &stateName, &health) != 0 {
+			continue
+		}
+		if state == C.POOL_STATE_DESTROYED && !opts.IncludeDestroyed {
+			continue
+		}
+
+		n := C.go_import_config_device_paths(config, nil, 0)
+		devices := make([]string, 0, int(n))
+		if n > 0 {
+			buf := make([]*C.char, int(n))
+			C.go_import_config_device_paths(config, &buf[0], n)
+			for _, p := range buf {
+				devices = append(devices, C.GoString(p))
+			}
+		}
+
+		result = append(result, ImportablePool{
+			Name:        C.GoString(name),
+			GUID:        uint64(guid),
+			State:       C.GoString(stateName),
+			Health:      C.GoString(health),
+			DevicePaths: devices,
+		})
+	}
+
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result, nil
 }
 
 func (d *libzfsDriver) ImportPool(ctx context.Context, poolName string, opts ImportOptions) error {
@@ -545,9 +637,74 @@ func (d *libzfsDriver) ImportPool(ctx context.Context, poolName string, opts Imp
 		return fmt.Errorf("driver closed")
 	}
 
-	// TODO: Implement pool import - requires complex nvlist handling
-	return fmt.Errorf("ImportPool not fully implemented yet")
+	poolNameC := C.CString(poolName)
+	defer C.free(unsafe.Pointer(poolNameC))
+
+	var newNameC, altRootC *C.char
+	if opts.NewName != "" {
+		newNameC = C.CString(opts.NewName)
+		defer C.free(unsafe.Pointer(newNameC))
+	}
+	if opts.AltRoot != "" {
+		altRootC = C.CString(opts.AltRoot)
+		defer C.free(unsafe.Pointer(altRootC))
+	}
+
+	pathsC, freePaths := cStringArray(opts.SearchPaths)
+	defer freePaths()
+
+	flags := C.int(C.ZFS_IMPORT_NORMAL)
+	if opts.Force {
+		flags |= C.ZFS_IMPORT_ANY_HOST
+	}
+	destroyed := C.int(0)
+	if opts.Destroyed {
+		destroyed = 1
+	}
+
+	errBuf := make([]byte, 1024)
+	ret := C.go_zpool_import(d.h, poolNameC, pathsC, C.int(len(opts.SearchPaths)),
+		newNameC, altRootC, flags, destroyed,
+		(*C.char)(unsafe.Pointer(&errBuf[0])), C.size_t(len(errBuf)))
+
+	switch ret {
+	case importOK:
+		return nil
+	case importErrNotFound:
+		if opts.Destroyed {
+			return fmt.Errorf("cannot import pool %s: no such destroyed pool available for import", poolName)
+		}
+		return fmt.Errorf("cannot import pool %s: no such pool available for import", poolName)
+	case importErrAmbiguous:
+		return fmt.Errorf("cannot import pool %s: multiple importable pools share this name", poolName)
+	case importErrSearchFailed:
+		return fmt.Errorf("cannot import pool %s: device search failed: %s",
+			poolName, C.GoString((*C.char)(unsafe.Pointer(&errBuf[0]))))
+	case importErrNoMem:
+		return fmt.Errorf("cannot import pool %s: out of memory", poolName)
+	default:
+		errno := C.go_libzfs_errno(d.h)
+		desc := C.GoString(C.go_libzfs_error_description(d.h))
+		stage := map[C.int]string{
+			importErrImport: "import failed",
+			importErrOpen:   "imported but could not be opened",
+			importErrMount:  "imported but some datasets could not be mounted",
+		}[ret]
+		return fmt.Errorf("cannot import pool %s: %s (errno %d): %s", poolName, stage, errno, desc)
+	}
 }
+
+// Return codes of go_zpool_import; keep in sync with GO_IMPORT_* in internal/cgo.
+const (
+	importOK              C.int = 0
+	importErrNotFound     C.int = -1
+	importErrAmbiguous    C.int = -2
+	importErrSearchFailed C.int = -3
+	importErrImport       C.int = -4
+	importErrOpen         C.int = -5
+	importErrMount        C.int = -6
+	importErrNoMem        C.int = -7
+)
 
 func (d *libzfsDriver) ExportPool(ctx context.Context, poolName string, opts ExportOptions) error {
 	d.mu.Lock()
@@ -1585,6 +1742,12 @@ func (d *libzfsDriver) checkZFSFeature(feature string) (bool, error) {
 	// module capabilities or check against known version matrices
 
 	commonFeatures := map[string]bool{
+		// Core operations provided by the libzfs driver
+		"pools":     true,
+		"datasets":  true,
+		"snapshots": true,
+		"clones":    true,
+
 		"bookmarks":             true,
 		"encryption":            true,
 		"large_blocks":          true,

@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/zombocoder/go-freebsd-libzfs/errors"
 	"github.com/zombocoder/go-freebsd-libzfs/zfs"
 	"github.com/zombocoder/go-freebsd-libzfs/zpool"
-	"github.com/zombocoder/go-freebsd-libzfs/errors"
 )
 
 func main() {
@@ -29,7 +29,7 @@ func main() {
 	_, err = poolClient.Get(ctx, "nonexistent-pool-12345")
 	if err != nil {
 		fmt.Printf("Expected error for non-existent pool: %v\n", err)
-		
+
 		if errors.IsPoolNotFound(err) {
 			fmt.Println("✓ Correctly detected as pool not found")
 		} else {
@@ -38,7 +38,7 @@ func main() {
 
 		// Check if it's a ZFS error
 		if zfsErr, ok := errors.AsZfsError(err); ok {
-			fmt.Printf("✓ ZFS Error details - Op: %s, Code: %s, Detail: %s\n", 
+			fmt.Printf("✓ ZFS Error details - Op: %s, Code: %s, Detail: %s\n",
 				zfsErr.Op, zfsErr.Code, zfsErr.Detail)
 		}
 	}
@@ -55,7 +55,7 @@ func main() {
 	_, err = datasetClient.Get(ctx, "nonexistent/dataset/12345")
 	if err != nil {
 		fmt.Printf("Expected error for non-existent dataset: %v\n", err)
-		
+
 		if errors.IsDatasetNotFound(err) {
 			fmt.Println("✓ Correctly detected as dataset not found")
 		} else {
@@ -75,12 +75,12 @@ func main() {
 
 	// Test property error handling
 	fmt.Println("\n3. Testing property error handling...")
-	
+
 	// Try to get properties for non-existent dataset
 	_, err = datasetClient.GetProperties(ctx, "fake/dataset", "used", "avail")
 	if err != nil {
 		fmt.Printf("Expected error for properties on non-existent dataset: %v\n", err)
-		
+
 		if errors.IsDatasetNotFound(err) {
 			fmt.Println("✓ Property retrieval correctly failed with dataset not found")
 		}
@@ -88,11 +88,11 @@ func main() {
 
 	// Test custom error creation
 	fmt.Println("\n4. Testing custom error creation...")
-	
-	customErr := errors.NewZfsError("test_operation", "test_resource", 
+
+	customErr := errors.NewZfsError("test_operation", "test_resource",
 		errors.ErrCodeInval, 22, "custom test error", nil)
 	fmt.Printf("Custom error: %v\n", customErr)
-	
+
 	wrappedErr := fmt.Errorf("operation failed: %w", customErr)
 	if errors.IsZfsError(wrappedErr) {
 		fmt.Println("✓ Wrapped error correctly detected as ZFS error")

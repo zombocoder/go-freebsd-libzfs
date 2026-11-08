@@ -36,7 +36,7 @@ func main() {
 
 	operation := os.Args[1]
 	target := os.Args[2]
-	
+
 	ctx := context.Background()
 
 	client, err := zfs.New(ctx)
@@ -86,7 +86,7 @@ func createSnapshot(ctx context.Context, client *zfs.Client, snapshotName string
 		return fmt.Errorf("snapshot name must be in format dataset@snapshot")
 	}
 
-	fmt.Printf("Creating %ssnapshot: %s\n", 
+	fmt.Printf("Creating %ssnapshot: %s\n",
 		map[bool]string{true: "recursive ", false: ""}[recursive], snapshotName)
 
 	properties := map[string]string{
@@ -104,10 +104,10 @@ func destroySnapshot(ctx context.Context, client *zfs.Client, snapshotName strin
 	fmt.Printf("WARNING: You are about to DESTROY snapshot '%s'\n", snapshotName)
 	fmt.Println("This operation is IRREVERSIBLE!")
 	fmt.Print("Type 'DELETE' to confirm: ")
-	
+
 	var confirmation string
 	fmt.Scanln(&confirmation)
-	
+
 	if confirmation != "DELETE" {
 		return fmt.Errorf("operation cancelled - confirmation not provided")
 	}
@@ -124,10 +124,10 @@ func rollbackToSnapshot(ctx context.Context, client *zfs.Client, datasetName, sn
 		fmt.Println("FORCE MODE: Will destroy conflicting snapshots!")
 	}
 	fmt.Print("Type 'ROLLBACK' to confirm: ")
-	
+
 	var confirmation string
 	fmt.Scanln(&confirmation)
-	
+
 	if confirmation != "ROLLBACK" {
 		return fmt.Errorf("operation cancelled - confirmation not provided")
 	}
@@ -166,7 +166,7 @@ func listSnapshots(ctx context.Context, client *zfs.Client, parent string) error
 		fmt.Printf("\nParent: %s\n", parentName)
 		fmt.Printf("%-30s %-20s %s\n", "Snapshot Name", "Type", "GUID")
 		fmt.Printf("%-30s %-20s %s\n", strings.Repeat("-", 30), strings.Repeat("-", 20), strings.Repeat("-", 10))
-		
+
 		for _, snap := range snapList {
 			snapName := snap.Name
 			if atIndex := strings.LastIndex(snapName, "@"); atIndex != -1 {
@@ -181,7 +181,7 @@ func listSnapshots(ctx context.Context, client *zfs.Client, parent string) error
 		firstSnap := snapshots[0]
 		fmt.Printf("\nSample properties for snapshot %s:\n", firstSnap.Name)
 		fmt.Printf("=====================================\n")
-		
+
 		props, err := client.GetProperties(ctx, firstSnap.Name, "used", "creation", "referenced")
 		if err == nil && len(props) > 0 {
 			for name, prop := range props {

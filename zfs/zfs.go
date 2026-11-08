@@ -187,6 +187,7 @@ const (
 	PropertySourceDefault   PropertySource = "default"
 	PropertySourceTemporary PropertySource = "temporary"
 	PropertySourceReceived  PropertySource = "received"
+	PropertySourceNone      PropertySource = "none" // read-only or statistic property
 )
 
 // Common dataset property names

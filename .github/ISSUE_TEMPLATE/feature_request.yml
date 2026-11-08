@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest a new operation or an improvement to the API
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What do you want to do?
+      description: The task you are trying to accomplish and why the current API does not cover it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: zfs-equivalent
+    attributes:
+      label: Equivalent zfs/zpool command
+      description: If the feature mirrors a CLI command, which one (e.g. `zpool trim -w tank`)?
+      render: shell
+
+  - type: textarea
+    id: api
+    attributes:
+      label: Proposed API
+      description: How would you like to call it from Go? Rough sketches are fine.
+      render: go
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I would like to implement this myself

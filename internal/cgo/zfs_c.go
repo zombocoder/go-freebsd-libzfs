@@ -4,8 +4,9 @@ package cgo
 
 /*
 #cgo CFLAGS: -I/usr/src/sys/contrib/openzfs/lib/libspl/include -I/usr/src/sys/contrib/openzfs/lib/libspl/include/os/freebsd -I/usr/src/sys/contrib/openzfs/include
-#cgo LDFLAGS: -lzfs -lnvpair
+#cgo LDFLAGS: -lzfs -lnvpair -lzutil
 #include <libzfs.h>
+#include <libzutil.h>
 #include <sys/nvpair.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,8 +36,7 @@ const char* go_zpool_get_name(zpool_handle_t* zhp) {
 }
 
 uint64_t go_zpool_get_guid(zpool_handle_t* zhp) {
-    // TODO: Get GUID from properties or other means
-    return 0;
+    return zpool_get_prop_int(zhp, ZPOOL_PROP_GUID, NULL);
 }
 
 // Dataset handle accessors
@@ -155,15 +155,20 @@ int go_get_zfs_prop_mountpoint() { return ZFS_PROP_MOUNTPOINT; }
 int go_get_zfs_prop_compression() { return ZFS_PROP_COMPRESSION; }
 
 // Property retrieval with proper error handling
-int go_get_zpool_property(zpool_handle_t* zhp, int prop, char* buf, size_t len) {
-    zprop_source_t src;
-    return zpool_get_prop(zhp, prop, buf, len, &src, B_FALSE);
+// src_out receives the zprop_source_t of the value (ZPROP_SRC_*).
+int go_get_zpool_property(zpool_handle_t* zhp, int prop, char* buf, size_t len, int* src_out) {
+    zprop_source_t src = ZPROP_SRC_NONE;
+    int ret = zpool_get_prop(zhp, prop, buf, len, &src, B_FALSE);
+    *src_out = (int)src;
+    return ret;
 }
 
-int go_get_zfs_property(zfs_handle_t* zhp, int prop, char* buf, size_t len) {
-    zprop_source_t src;
+int go_get_zfs_property(zfs_handle_t* zhp, int prop, char* buf, size_t len, int* src_out) {
+    zprop_source_t src = ZPROP_SRC_NONE;
     char statbuf[256] = {0};
-    return zfs_prop_get(zhp, prop, buf, len, &src, statbuf, sizeof(statbuf), B_FALSE);
+    int ret = zfs_prop_get(zhp, prop, buf, len, &src, statbuf, sizeof(statbuf), B_FALSE);
+    *src_out = (int)src;
+    return ret;
 }
 
 // Pool configuration and status helpers
@@ -201,82 +206,144 @@ int go_nvlist_lookup_uint64_array(nvlist_t* nvl, const char* name, uint64_t** va
     return nvlist_lookup_uint64_array(nvl, name, val, nelem);
 }
 
-// Pool scan/scrub status - simplified for now
-typedef struct scan_info {
-    uint64_t func;
-    uint64_t state;
-    uint64_t start_time;
-    uint64_t end_time;
-    uint64_t examined;
-    uint64_t to_examine;
-    uint64_t processed;
-    uint64_t to_process;
-    uint64_t errors;
-    uint64_t pass_examined;
-    uint64_t pass_start;
-} scan_info_t;
+// ---- Pool status helpers ----
 
-int go_get_scan_status(nvlist_t* nvroot, scan_info_t* scan) {
-    nvlist_t* scan_nvl = NULL;
-    uint64_t* scan_stats = NULL;
-    uint_t scan_stats_count = 0;
-
-    // Initialize all fields to zero
-    memset(scan, 0, sizeof(scan_info_t));
-
-    // Look for scan stats in the nvlist
-    if (nvlist_lookup_nvlist(nvroot, "scan_stats", &scan_nvl) != 0) {
-        // No scan stats found - not an error, just means no scan is running
-        return 0;
+// go_zpool_status_name returns the name of a zpool_status_t without the
+// ZPOOL_STATUS_ prefix.
+const char *go_zpool_status_name(int status) {
+    switch ((zpool_status_t)status) {
+    case ZPOOL_STATUS_CORRUPT_CACHE: return "CORRUPT_CACHE";
+    case ZPOOL_STATUS_MISSING_DEV_R: return "MISSING_DEV_R";
+    case ZPOOL_STATUS_MISSING_DEV_NR: return "MISSING_DEV_NR";
+    case ZPOOL_STATUS_CORRUPT_LABEL_R: return "CORRUPT_LABEL_R";
+    case ZPOOL_STATUS_CORRUPT_LABEL_NR: return "CORRUPT_LABEL_NR";
+    case ZPOOL_STATUS_BAD_GUID_SUM: return "BAD_GUID_SUM";
+    case ZPOOL_STATUS_CORRUPT_POOL: return "CORRUPT_POOL";
+    case ZPOOL_STATUS_CORRUPT_DATA: return "CORRUPT_DATA";
+    case ZPOOL_STATUS_FAILING_DEV: return "FAILING_DEV";
+    case ZPOOL_STATUS_VERSION_NEWER: return "VERSION_NEWER";
+    case ZPOOL_STATUS_HOSTID_MISMATCH: return "HOSTID_MISMATCH";
+    case ZPOOL_STATUS_HOSTID_ACTIVE: return "HOSTID_ACTIVE";
+    case ZPOOL_STATUS_HOSTID_REQUIRED: return "HOSTID_REQUIRED";
+    case ZPOOL_STATUS_IO_FAILURE_WAIT: return "IO_FAILURE_WAIT";
+    case ZPOOL_STATUS_IO_FAILURE_CONTINUE: return "IO_FAILURE_CONTINUE";
+    case ZPOOL_STATUS_IO_FAILURE_MMP: return "IO_FAILURE_MMP";
+    case ZPOOL_STATUS_BAD_LOG: return "BAD_LOG";
+    case ZPOOL_STATUS_ERRATA: return "ERRATA";
+    case ZPOOL_STATUS_UNSUP_FEAT_READ: return "UNSUP_FEAT_READ";
+    case ZPOOL_STATUS_UNSUP_FEAT_WRITE: return "UNSUP_FEAT_WRITE";
+    case ZPOOL_STATUS_FAULTED_DEV_R: return "FAULTED_DEV_R";
+    case ZPOOL_STATUS_FAULTED_DEV_NR: return "FAULTED_DEV_NR";
+    case ZPOOL_STATUS_VERSION_OLDER: return "VERSION_OLDER";
+    case ZPOOL_STATUS_FEAT_DISABLED: return "FEAT_DISABLED";
+    case ZPOOL_STATUS_RESILVERING: return "RESILVERING";
+    case ZPOOL_STATUS_OFFLINE_DEV: return "OFFLINE_DEV";
+    case ZPOOL_STATUS_REMOVED_DEV: return "REMOVED_DEV";
+    case ZPOOL_STATUS_REBUILDING: return "REBUILDING";
+    case ZPOOL_STATUS_REBUILD_SCRUB: return "REBUILD_SCRUB";
+    case ZPOOL_STATUS_NON_NATIVE_ASHIFT: return "NON_NATIVE_ASHIFT";
+    case ZPOOL_STATUS_COMPATIBILITY_ERR: return "COMPATIBILITY_ERR";
+    case ZPOOL_STATUS_INCOMPATIBLE_FEAT: return "INCOMPATIBLE_FEAT";
+    case ZPOOL_STATUS_OK: return "OK";
     }
+    return "UNKNOWN";
+}
 
-    // Extract scan stats array
-    if (nvlist_lookup_uint64_array(scan_nvl, "scan_stats", &scan_stats, &scan_stats_count) != 0) {
-        return 0;
+// go_zpool_health stores the pool's health property (as `zpool list` shows it).
+int go_zpool_health(zpool_handle_t *zhp, char *buf, size_t len) {
+    return zpool_get_prop(zhp, ZPOOL_PROP_HEALTH, buf, len, NULL, B_FALSE);
+}
+
+// go_config_vdev_tree returns the root vdev nvlist of a pool config, or NULL.
+nvlist_t *go_config_vdev_tree(nvlist_t *config) {
+    nvlist_t *nvroot = NULL;
+    if (nvlist_lookup_nvlist(config, ZPOOL_CONFIG_VDEV_TREE, &nvroot) != 0)
+        return NULL;
+    return nvroot;
+}
+
+// go_pool_errcount returns the number of persistent data errors of a pool.
+uint64_t go_pool_errcount(nvlist_t *config) {
+    uint64_t n = 0;
+    (void) nvlist_lookup_uint64(config, ZPOOL_CONFIG_ERRCOUNT, &n);
+    return n;
+}
+
+#define GO_VDEV_CHILDREN 0
+#define GO_VDEV_SPARES   1
+#define GO_VDEV_L2CACHE  2
+
+// go_vdev_group stores the child array of the given group (GO_VDEV_*) of a
+// vdev and returns its length (0 when absent).
+int go_vdev_group(nvlist_t *nv, int group, nvlist_t ***child, uint_t *n) {
+    const char *key = group == GO_VDEV_SPARES ? ZPOOL_CONFIG_SPARES :
+        group == GO_VDEV_L2CACHE ? ZPOOL_CONFIG_L2CACHE : ZPOOL_CONFIG_CHILDREN;
+    if (nvlist_lookup_nvlist_array(nv, key, child, n) != 0) {
+        *child = NULL;
+        *n = 0;
     }
+    return (int)*n;
+}
 
-    // Parse scan stats according to ZFS scan_stat structure
-    // Based on OpenZFS scan_stat indices
-    if (scan_stats_count >= 11) {
-        scan->func = scan_stats[0];         // pool_scan_func_t
-        scan->state = scan_stats[1];        // dsl_scan_state_t
-        scan->start_time = scan_stats[2];   // scan start time
-        scan->end_time = scan_stats[3];     // scan end time
-        scan->to_examine = scan_stats[4];   // total bytes to examine
-        scan->examined = scan_stats[5];     // bytes examined so far
-        scan->to_process = scan_stats[6];   // total bytes to process
-        scan->processed = scan_stats[7];    // bytes processed so far
-        scan->errors = scan_stats[8];       // scan errors
-        scan->pass_examined = scan_stats[9]; // bytes examined this pass
-        scan->pass_start = scan_stats[10];  // pass start time
+// go_vdev_get_info extracts the type, path, display state and statistics of a
+// vdev. nums receives guid, alloc, space, dspace, read, write and checksum
+// errors. Spares report AVAIL/INUSE like `zpool status`.
+void go_vdev_get_info(nvlist_t *nv, int is_spare, const char **type,
+    const char **path, const char **state, uint64_t *nums)
+{
+    vdev_stat_t *vs;
+    uint_t c;
+
+    *type = "";
+    *path = "";
+    *state = "UNKNOWN";
+    memset(nums, 0, 7 * sizeof (uint64_t));
+    (void) nvlist_lookup_string(nv, ZPOOL_CONFIG_TYPE, type);
+    (void) nvlist_lookup_string(nv, ZPOOL_CONFIG_PATH, path);
+    (void) nvlist_lookup_uint64(nv, ZPOOL_CONFIG_GUID, &nums[0]);
+    if (nvlist_lookup_uint64_array(nv, ZPOOL_CONFIG_VDEV_STATS,
+        (uint64_t **)&vs, &c) != 0)
+        return;
+
+    *state = zpool_state_to_name(vs->vs_state, vs->vs_aux);
+    if (is_spare) {
+        if (vs->vs_aux == VDEV_AUX_SPARED)
+            *state = "INUSE";
+        else if (vs->vs_state == VDEV_STATE_HEALTHY)
+            *state = "AVAIL";
     }
+    nums[1] = vs->vs_alloc;
+    nums[2] = vs->vs_space;
+    nums[3] = vs->vs_dspace;
+    nums[4] = vs->vs_read_errors;
+    nums[5] = vs->vs_write_errors;
+    nums[6] = vs->vs_checksum_errors;
+}
 
+// go_pool_scan_stats copies the scan statistics of the root vdev into out.
+// Returns -1 when the pool has no scan statistics.
+int go_pool_scan_stats(nvlist_t *nvroot, pool_scan_stat_t *out) {
+    uint64_t *arr;
+    uint_t c;
+    size_t n;
+
+    memset(out, 0, sizeof (*out));
+    if (nvlist_lookup_uint64_array(nvroot, ZPOOL_CONFIG_SCAN_STATS, &arr, &c) != 0)
+        return -1;
+    n = c * sizeof (uint64_t);
+    if (n > sizeof (*out))
+        n = sizeof (*out);
+    memcpy(out, arr, n);
     return 0;
 }
 
-// Pool import/export operations
-int go_zpool_import(libzfs_handle_t* hdl, nvlist_t* config, const char* newname, const char* altroot) {
-    return zpool_import(hdl, config, newname, (char*)altroot);
-}
-
+// Pool export operations
 int go_zpool_export(zpool_handle_t* zhp, boolean_t force, const char* message) {
     return zpool_export(zhp, force, message);
 }
 
 int go_zpool_export_force(zpool_handle_t* zhp) {
     return zpool_export(zhp, B_TRUE, "Exported via Go ZFS library");
-}
-
-// Pool discovery for import operations
-nvlist_t* go_zpool_find_import(libzfs_handle_t* hdl, int argc, char** argv, boolean_t do_destroyed,
-                               char** poolname) {
-    // This is a complex operation that requires scanning devices and building nvlist configs
-    // The real implementation would use pool_list functions from libzutil
-    // For production use, this needs proper device scanning implementation
-
-    // Return NULL for now - indicates no importable pools found
-    // This is functionally correct behavior, just not feature-complete
-    return NULL;
 }
 
 // Pool creation helpers
@@ -577,6 +644,185 @@ int go_get_zfs_online_checkremove() { return ZFS_ONLINE_CHECKREMOVE; }
 int go_get_zfs_online_unspare() { return ZFS_ONLINE_UNSPARE; }
 int go_get_zfs_online_forcefault() { return ZFS_ONLINE_FORCEFAULT; }
 int go_get_zfs_online_expand() { return ZFS_ONLINE_EXPAND; }
+
+// Pool import. Return codes must stay in sync with importErr* in the driver.
+#define GO_IMPORT_OK              0
+#define GO_IMPORT_NOT_FOUND      -1  // no importable pool with that name
+#define GO_IMPORT_AMBIGUOUS      -2  // several importable pools share the name
+#define GO_IMPORT_SEARCH_FAILED  -3  // device scan failed, see errbuf
+#define GO_IMPORT_FAILED         -4  // zpool_import_props failed, see libzfs error
+#define GO_IMPORT_OPEN_FAILED    -5  // pool imported but could not be opened
+#define GO_IMPORT_MOUNT_FAILED   -6  // pool imported but datasets not mounted
+#define GO_IMPORT_NOMEM          -7
+
+// go_zpool_search scans paths (or the default device directories when npaths
+// is 0) for pools that are not currently imported, optionally restricted to
+// poolname (may be NULL). It returns an nvlist of pool configs keyed by pool
+// name, to be freed with nvlist_free, or NULL. On NULL, *err is non-zero and
+// errbuf holds a description if the scan itself failed; *err is 0 when simply
+// nothing was found. Destroyed pools are included; callers filter by
+// ZPOOL_CONFIG_POOL_STATE.
+nvlist_t *go_zpool_search(libzfs_handle_t *hdl, const char *poolname,
+    char **paths, int npaths, char *errbuf, size_t errlen, int *err)
+{
+    libpc_handle_t lpch;
+    importargs_t args;
+    nvlist_t *pools;
+    size_t ndefault = 0;
+
+    *err = 0;
+    errbuf[0] = '\0';
+    memset(&lpch, 0, sizeof (lpch));
+    lpch.lpc_ops = &libzfs_config_ops;
+    lpch.lpc_lib_handle = hdl;
+
+    memset(&args, 0, sizeof (args));
+    if (npaths > 0) {
+        args.path = paths;
+        args.paths = npaths;
+    } else {
+        args.path = (char **)zpool_default_search_paths(&ndefault);
+        args.paths = (int)ndefault;
+    }
+    args.poolname = poolname;
+
+    pools = zpool_search_import(&lpch, &args);
+    if (pools == NULL && lpch.lpc_error != 0) {
+        *err = lpch.lpc_error;
+        snprintf(errbuf, errlen, "%s", libpc_error_description(&lpch));
+    }
+    return pools;
+}
+
+// go_import_config_summary extracts the identity, state and health of a pool
+// from an import config returned by go_zpool_search. Strings point into the
+// config or static storage. Returns 0 on success, -1 if the config is malformed.
+int go_import_config_summary(nvlist_t *config, const char **name, uint64_t *guid,
+    uint64_t *state, const char **state_name, const char **health)
+{
+    nvlist_t *nvroot;
+    vdev_stat_t *vs;
+    uint_t vsc;
+
+    if (nvlist_lookup_string(config, ZPOOL_CONFIG_POOL_NAME, name) != 0 ||
+        nvlist_lookup_uint64(config, ZPOOL_CONFIG_POOL_GUID, guid) != 0 ||
+        nvlist_lookup_uint64(config, ZPOOL_CONFIG_POOL_STATE, state) != 0 ||
+        nvlist_lookup_nvlist(config, ZPOOL_CONFIG_VDEV_TREE, &nvroot) != 0 ||
+        nvlist_lookup_uint64_array(nvroot, ZPOOL_CONFIG_VDEV_STATS,
+        (uint64_t **)&vs, &vsc) != 0)
+        return -1;
+
+    *state_name = zpool_pool_state_to_name((pool_state_t)*state);
+    *health = zpool_state_to_name(vs->vs_state, vs->vs_aux);
+    return 0;
+}
+
+static int collect_leaf_paths(nvlist_t *nv, const char **out, int max, int n)
+{
+    static const char *const groups[] = {
+        ZPOOL_CONFIG_CHILDREN, ZPOOL_CONFIG_L2CACHE, ZPOOL_CONFIG_SPARES
+    };
+    nvlist_t **child;
+    uint_t nchild, c;
+    const char *path;
+    int found_children = 0;
+
+    for (size_t g = 0; g < sizeof (groups) / sizeof (groups[0]); g++) {
+        if (nvlist_lookup_nvlist_array(nv, groups[g], &child, &nchild) != 0)
+            continue;
+        found_children = 1;
+        for (c = 0; c < nchild; c++)
+            n = collect_leaf_paths(child[c], out, max, n);
+    }
+    if (!found_children &&
+        nvlist_lookup_string(nv, ZPOOL_CONFIG_PATH, &path) == 0) {
+        if (n < max)
+            out[n] = path;
+        n++;
+    }
+    return n;
+}
+
+// go_import_config_device_paths stores up to max leaf device paths of the
+// pool's vdev tree (data, cache and spare devices) in out and returns the total
+// number of leaf devices, which may exceed max.
+int go_import_config_device_paths(nvlist_t *config, const char **out, int max)
+{
+    nvlist_t *nvroot;
+
+    if (nvlist_lookup_nvlist(config, ZPOOL_CONFIG_VDEV_TREE, &nvroot) != 0)
+        return 0;
+    return collect_leaf_paths(nvroot, out, max, 0);
+}
+
+// go_zpool_import finds the exported (or, with destroyed, destroyed) pool
+// named poolname by scanning paths (or the default device directories when
+// npaths is 0), imports it, optionally under newname and/or altroot, and mounts
+// its datasets. It mirrors the do_import() path of zpool(8).
+int go_zpool_import(libzfs_handle_t *hdl, const char *poolname,
+    char **paths, int npaths, const char *newname, const char *altroot,
+    int flags, int destroyed, char *errbuf, size_t errlen)
+{
+    nvlist_t *pools, *config = NULL, *props = NULL;
+    nvpair_t *elem = NULL;
+    zpool_handle_t *zhp;
+    int matches = 0, ret = GO_IMPORT_OK, search_err = 0;
+
+    pools = go_zpool_search(hdl, poolname, paths, npaths, errbuf, errlen, &search_err);
+    if (pools == NULL)
+        return search_err ? GO_IMPORT_SEARCH_FAILED : GO_IMPORT_NOT_FOUND;
+
+    while ((elem = nvlist_next_nvpair(pools, elem)) != NULL) {
+        nvlist_t *c;
+        uint64_t state;
+        if (nvpair_value_nvlist(elem, &c) != 0 ||
+            nvlist_lookup_uint64(c, ZPOOL_CONFIG_POOL_STATE, &state) != 0)
+            continue;
+        if ((state == POOL_STATE_DESTROYED) != (destroyed != 0))
+            continue;
+        config = c;
+        matches++;
+    }
+    if (matches == 0) {
+        ret = GO_IMPORT_NOT_FOUND;
+        goto out;
+    }
+    if (matches > 1) {
+        ret = GO_IMPORT_AMBIGUOUS;
+        goto out;
+    }
+
+    if (altroot != NULL) {
+        if (nvlist_alloc(&props, NV_UNIQUE_NAME, 0) != 0 ||
+            nvlist_add_string(props,
+            zpool_prop_to_name(ZPOOL_PROP_ALTROOT), altroot) != 0 ||
+            nvlist_add_string(props,
+            zpool_prop_to_name(ZPOOL_PROP_CACHEFILE), "none") != 0) {
+            ret = GO_IMPORT_NOMEM;
+            goto out;
+        }
+    }
+
+    if (zpool_import_props(hdl, config, newname, props, flags) != 0) {
+        ret = GO_IMPORT_FAILED;
+        goto out;
+    }
+
+    zhp = zpool_open_canfail(hdl, newname != NULL ? newname : poolname);
+    if (zhp == NULL) {
+        ret = GO_IMPORT_OPEN_FAILED;
+        goto out;
+    }
+    if (zpool_get_state(zhp) != POOL_STATE_UNAVAIL &&
+        zpool_enable_datasets(zhp, NULL, 0, 1) != 0)
+        ret = GO_IMPORT_MOUNT_FAILED;
+    zpool_close(zhp);
+
+out:
+    nvlist_free(props);
+    nvlist_free(pools);
+    return ret;
+}
 */
 import "C"
 

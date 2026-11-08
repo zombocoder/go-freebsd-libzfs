@@ -1,33 +1,38 @@
 # go-freebsd-libzfs
 
+[![CI](https://github.com/zombocoder/go-freebsd-libzfs/actions/workflows/ci.yml/badge.svg)](https://github.com/zombocoder/go-freebsd-libzfs/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/zombocoder/go-freebsd-libzfs.svg)](https://pkg.go.dev/github.com/zombocoder/go-freebsd-libzfs)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-%3E%3D1.22-00ADD8.svg)](https://golang.org/)
-[![FreeBSD](https://img.shields.io/badge/FreeBSD-14.3%2B-red.svg)](https://www.freebsd.org/)
+[![FreeBSD](https://img.shields.io/badge/FreeBSD-14%20%7C%2015-red.svg)](https://www.freebsd.org/)
 
-A production-ready, comprehensive FreeBSD-native Go library for ZFS operations using libzfs via CGO.
+A FreeBSD-native Go library for managing ZFS pools and datasets through libzfs (via cgo).
 
 ## Overview
 
-This library provides complete, idiomatic Go bindings for FreeBSD's OpenZFS stack with **zero external dependencies** (no `zfs`/`zpool` CLI calls). It offers full dataset management, pool operations, advanced snapshot handling, clone operations, vdev management, and comprehensive property management through a **type-safe, context-aware API**.
+This library provides idiomatic Go bindings for FreeBSD's OpenZFS stack that call libzfs directly — **no `zfs`/`zpool` CLI calls**. It covers datasets, snapshots, clones, properties, pool import/export, pool health and status, and scrubs through a **type-safe, context-aware API**.
 
-**Target Platform:** FreeBSD 13.2+ with OpenZFS 2.x  
-**Tested On:** FreeBSD 14.3-RELEASE-p3 with OpenZFS 2.1+  
+**Platform:** FreeBSD 14 and 15 (OpenZFS 2.2+)  
+**Tested in CI on:** FreeBSD 14.5 and 15.1, against real ZFS pools in QEMU VMs  
 **Go Version:** 1.22+
+
+> The project is young and has no tagged release yet; the API may still change.
+> See the [changelog](CHANGELOG.md).
 
 ## Key Features
 
-**Production Ready** - Comprehensive test suite, memory-safe CGO implementation  
+**Tested Against Real ZFS** - Integration tests compare results with `zfs`/`zpool` on throwaway pools  
 **Complete Dataset Support** - Filesystems, volumes, snapshots, and bookmarks  
 **Advanced Snapshots** - Create, list, rollback, destroy with hierarchical filtering  
 **Clone Operations** - Create, promote, manage, and query clone relationships  
-**Vdev Management** - Add, attach, detach, replace, online/offline vdevs  
 **Property Management** - Type-safe get/set operations with source tracking  
-**Pool Operations** - Import, export, create, destroy with health monitoring  
+**Pool Operations** - Discover, import, export, create, destroy  
+**Pool Health** - `zpool status`-level detail: vdev tree, error counters, scrub/resilver progress, status codes  
+**Scrub Control** - Start, pause, resume and stop scrubs  
 **Feature Detection** - Runtime capability probing and version detection  
-**Memory Safe** - Proper CGO resource management with no leaks  
+**Memory Safe** - Every C allocation freed, every libzfs handle closed  
 **Type Safe** - Strongly typed APIs throughout with comprehensive error handling  
-**Zero Dependencies** - Direct libzfs integration, no CLI shelling  
+**No CLI Shelling** - Direct libzfs integration  
 **Context Aware** - All operations support context.Context for cancellation
 
 ## Architecture
@@ -49,18 +54,26 @@ This library provides complete, idiomatic Go bindings for FreeBSD's OpenZFS stac
 
 ## Requirements
 
-- FreeBSD 13.2+ with OpenZFS
+- FreeBSD 14 or 15 with OpenZFS 2.2+ (libzfs, libzutil and libnvpair are part of the base system)
 - Go 1.22+
-- libzfs and libnvpair libraries
-- OpenZFS source headers (for compilation)
+- OpenZFS headers in `/usr/src/sys/contrib/openzfs` for compilation (see below)
 
 ## Installation
 
 ```bash
-# Ensure OpenZFS headers are available
-# The library expects headers at: /usr/src/sys/contrib/openzfs/
-
 go get github.com/zombocoder/go-freebsd-libzfs
+```
+
+The cgo code needs the OpenZFS headers from the FreeBSD source tree. If
+`/usr/src/sys/contrib/openzfs/include/libzfs.h` is missing, extract them from
+the `src.txz` of the release you run:
+
+```bash
+rel=$(freebsd-version -u | sed -E 's/-p[0-9]+$//')
+fetch "https://download.freebsd.org/releases/$(uname -m)/${rel}/src.txz"
+doas tar -xf src.txz -C / \
+    --include './usr/src/sys/contrib/openzfs/include/*' \
+    --include './usr/src/sys/contrib/openzfs/lib/libspl/include/*'
 ```
 
 ## Usage
@@ -122,6 +135,84 @@ func main() {
             pool.Name, pool.Health, pool.State)
     }
 }
+```
+
+### Pool Health, Status and Scrub
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    "github.com/zombocoder/go-freebsd-libzfs/zpool"
+)
+
+func main() {
+    ctx := context.Background()
+
+    client, err := zpool.New(ctx)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer client.Close()
+
+    st, err := client.GetStatus(ctx, "zroot")
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    fmt.Printf("%s: %s (%s)\n", st.Pool.Name, st.Pool.Health, st.Problem)
+    if st.MsgID != "" {
+        fmt.Printf("see https://openzfs.github.io/openzfs-docs/msg/%s\n", st.MsgID)
+    }
+
+    // Walk the vdev tree and report devices with errors
+    var walk func(v zpool.VDevTree)
+    walk = func(v zpool.VDevTree) {
+        if v.Stats.ReadErrors+v.Stats.WriteErrors+v.Stats.ChecksumErrors > 0 {
+            fmt.Printf("%s %s: read %d write %d cksum %d\n", v.Name, v.State,
+                v.Stats.ReadErrors, v.Stats.WriteErrors, v.Stats.ChecksumErrors)
+        }
+        for _, c := range v.Children {
+            walk(c)
+        }
+    }
+    walk(st.Config)
+
+    if st.Scan != nil {
+        fmt.Printf("last %s: %s, %d errors\n", st.Scan.Function, st.Scan.State, st.Scan.Errors)
+    }
+
+    // Start a scrub (requires root); PauseScrub / StopScrub control it
+    if err := client.StartScrub(ctx, "zroot"); err != nil {
+        log.Fatal(err)
+    }
+}
+```
+
+### Discovering and Importing Pools
+
+```go
+// Like `zpool import -d /var/tmp/disks`
+pools, err := client.Discover(ctx, zpool.DiscoverOptions{
+    SearchPaths: []string{"/var/tmp/disks"},
+})
+if err != nil {
+    log.Fatal(err)
+}
+for _, p := range pools {
+    fmt.Printf("%s (%d): %s, %s, devices %v\n", p.Name, p.GUID, p.State, p.Health, p.DevicePaths)
+}
+
+// Like `zpool import -d /var/tmp/disks -R /mnt tank tank2`
+err = client.Import(ctx, "tank", zpool.ImportOptions{
+    SearchPaths: []string{"/var/tmp/disks"},
+    AltRoot:     "/mnt",
+    NewName:     "tank2",
+})
 ```
 
 ### Dataset Operations
@@ -356,55 +447,39 @@ func main() {
 
 ## Examples
 
-The `examples/` directory contains comprehensive demonstration programs:
+The [`examples/`](examples/) directory has 12 runnable programs, from read-only
+listing to pool import and scrubbing, including:
 
-- **`examples/basic/`** - Basic pool and dataset operations
-- **`examples/list-snapshots/`** - Snapshot listing with hierarchical filtering
-- **`examples/snapshot-operations/`** - Complete snapshot lifecycle management
-- **`examples/clone-operations/`** - Clone creation, promotion, and management
-- **`examples/pool-list/`** - Pool discovery and status information
-- **`examples/dataset-properties/`** - Property management and inspection
-
-Run examples with root privileges:
+- **`basic`** — version, capabilities, pools, datasets, snapshots
+- **`pool-status`** — `zpool status`-style health report, exits 1 if a pool is unhealthy
+- **`pool-import`** — list importable pools and import them
+- **`scrub`** — start, pause, stop and monitor scrubs
+- **`snapshot-operations`**, **`clone-operations`**, **`dataset-operations`** — dataset lifecycle
 
 ```bash
-# List all snapshots
-doas go run examples/list-snapshots/main.go ""
-
-# List snapshots for specific parent (supports hierarchical matching)
-doas go run examples/list-snapshots/main.go "zroot/home"
-
-# Snapshot operations (create, list, destroy)
-doas go run examples/snapshot-operations/main.go create "zroot/example@backup"
-doas go run examples/snapshot-operations/main.go list "zroot/example"
-doas go run examples/snapshot-operations/main.go destroy "zroot/example@backup"
-
-# Clone operations (create, promote, manage)
-doas go run examples/clone-operations/main.go
-
-# Basic pool and dataset operations
-doas go run examples/basic/main.go
+go run ./examples/pool-status
+doas go run ./examples/scrub start -w zroot
 ```
+
+See [examples/README.md](examples/README.md) for all of them and a recipe for
+trying the pool examples on a throwaway file-backed pool.
 
 ## Testing
 
-### Unit Tests
-
 ```bash
-# Run unit tests
-go test ./...
+make test                     # unit and read-only integration tests, any user
+doas make test-destructive    # also tests that create throwaway pools (root)
 ```
 
-### Performance Validation
-
-The current implementation efficiently handles large ZFS installations:
-
-- Proper deduplication ensures no duplicate entries
-- Memory-safe CGO implementation with proper resource cleanup
+Integration tests compare the library with the `zfs`/`zpool` commands. Tests
+that change pools create their own small file-backed pools under `/var/tmp`
+and remove them afterwards; they only run as root with `ZFS_TEST_DESTRUCTIVE=1`.
+CI runs the full suite on FreeBSD 14.5 and 15.1. See
+[CONTRIBUTING.md](CONTRIBUTING.md#running-tests) for details.
 
 ## Status
 
-### **Production Ready - Core Features Complete**
+### Implemented
 
 #### **Comprehensive Dataset Management**
 
@@ -433,12 +508,14 @@ The current implementation efficiently handles large ZFS installations:
 
 #### **Pool Operations**
 
-- **Pool Discovery** - List all pools with health and state information
-- **Pool Import/Export** - Import and export pools with comprehensive options
-- **Pool Status** - Detailed pool health, state, and configuration information
-- **Pool Destruction** - Destroy pools with safety confirmations
+- **Pool Listing** - List all pools with GUID, health and state
+- **Pool Discovery** - Find pools available for import, including destroyed pools
+- **Pool Import/Export** - Import (search paths, new name, alternate root, force, destroyed) and export
+- **Pool Status** - Vdev tree with states and error counters, spares, cache, data errors, status code and message id
+- **Scrub** - Start, pause, resume, stop; progress and results
+- **Pool Destruction** - Destroy pools
 
-#### **Advanced Vdev Management**
+#### **Vdev Management** (driver level, not yet exposed in the public `zpool` API)
 
 - **Vdev Addition** - Add new vdevs to existing pools (mirrors, raidz, disks)
 - **Vdev Attachment** - Attach new devices to existing vdevs for mirroring/replacement
@@ -455,7 +532,7 @@ The current implementation efficiently handles large ZFS installations:
 - **Version Detection** - Query ZFS and kernel version information
 - **Capability Probing** - Runtime detection of available ZFS functionality
 
-#### **Production Quality Features**
+#### **Quality**
 
 - **Type Safety** - Strongly typed APIs for all ZFS operations
 - **Memory Safety** - Proper CGO resource management and cleanup
@@ -463,12 +540,12 @@ The current implementation efficiently handles large ZFS installations:
 - **Error Handling** - Comprehensive error propagation with ZFS errno details
 - **Context Support** - All operations accept context.Context for cancellation
 
-#### **Comprehensive Testing & Examples**
+#### **Testing & Examples**
 
-- **Test Suite** - Full functionality validation covering all features
-- **Example Programs** - 5 comprehensive examples covering all use cases
-- **Performance Tested** - Validated with 97 datasets across all types
-- **Memory Validated** - No memory leaks in CGO integration
+- **Integration tests** against real ZFS, compared with `zfs`/`zpool` output
+- **Destructive tests** on throwaway file-backed pools: import/export, discovery, degraded and corrupted mirrors, scrubs
+- **CI** on FreeBSD 14.5 and 15.1 (QEMU VMs)
+- **12 example programs**
 
 ### **Future Enhancements**
 
@@ -489,9 +566,10 @@ The current implementation efficiently handles large ZFS installations:
 #### **Advanced Features**
 
 - Event subscription system (`/zevent` package)
+- Vdev management in the public `zpool` API
+- ARC statistics
 - Performance benchmarks and optimization
 - IOCTL driver completion for CGO-free operation
-- Cross-platform compatibility layer
 
 ## Design Principles
 
@@ -503,13 +581,11 @@ The current implementation efficiently handles large ZFS installations:
 
 ## Contributing
 
-This library targets FreeBSD specifically. Contributions should:
-
-1. Follow existing code patterns and error handling
-2. Include unit tests for new functionality
-3. Update integration tests for complex operations
-4. Maintain the driver abstraction for future ioctl implementation
+Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for
+the development setup, how tests work and what is in scope, and follow the
+[Code of Conduct](CODE_OF_CONDUCT.md). Report security issues privately as
+described in [SECURITY.md](SECURITY.md).
 
 ## License
 
-See LICENSE file for details.
+MIT, see [LICENSE](LICENSE).
