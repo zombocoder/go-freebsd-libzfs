@@ -43,7 +43,9 @@ jobs:
     # pools; the VM is discarded afterwards.
     name: FreeBSD ${{ matrix.release }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # A normal run takes ~3 minutes; occasionally the VM hangs while booting
+    # under nested virtualization. Fail fast so the job can be re-run.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
