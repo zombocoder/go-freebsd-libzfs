@@ -16,8 +16,8 @@ This library provides idiomatic Go bindings for FreeBSD's OpenZFS stack that cal
 **Tested in CI on:** FreeBSD 14.5 and 15.1, against real ZFS pools in QEMU VMs  
 **Go Version:** 1.22+
 
-> The project is young and has no tagged release yet; the API may still change.
-> See the [changelog](CHANGELOG.md).
+> The project is pre-1.0: the API may still change between minor versions.
+> See the [changelog](CHANGELOG.md) and [releases](https://github.com/zombocoder/go-freebsd-libzfs/releases).
 
 ## Key Features
 

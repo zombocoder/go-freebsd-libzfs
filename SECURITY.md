@@ -2,8 +2,8 @@
 
 ## Supported versions
 
-The project has not had a tagged release yet. Security fixes are made on the
-`main` branch.
+Security fixes are made on the `main` branch and released in a new version.
+Before 1.0, only the latest release receives fixes.
 
 ## Reporting a vulnerability
 

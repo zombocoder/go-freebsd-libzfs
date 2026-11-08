@@ -2,9 +2,12 @@
 
 All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
-aims to follow [Semantic Versioning](https://semver.org/) once it is tagged.
+follows [Semantic Versioning](https://semver.org/). Before 1.0.0, minor
+versions may contain breaking API changes; they are listed under "Changed".
 
 ## [Unreleased]
+
+## [0.2.0] - 2026-11-08
 
 ### Added
 
@@ -47,4 +50,14 @@ aims to follow [Semantic Versioning](https://semver.org/) once it is tagged.
 
 - `zpool.ScanStatus.ToProcess` was replaced by `Issued` (bytes verified so far),
   which is what `zpool status` reports. The old field had no libzfs counterpart.
-- Minimum supported platform is FreeBSD 14 (OpenZFS 2.2+).
+- Minimum supported platform is FreeBSD 14 (OpenZFS 2.2+). Both OpenZFS 2.2
+  (FreeBSD 14.x) and 2.3+ (FreeBSD 15.x) are supported.
+
+## [0.1.0] - 2025-10-03
+
+First alpha release: client creation, driver abstraction with the libzfs cgo
+backend, and version probing.
+
+[Unreleased]: https://github.com/zombocoder/go-freebsd-libzfs/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/zombocoder/go-freebsd-libzfs/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/zombocoder/go-freebsd-libzfs/releases/tag/v0.1.0
