@@ -645,6 +645,16 @@ int go_get_zfs_online_unspare() { return ZFS_ONLINE_UNSPARE; }
 int go_get_zfs_online_forcefault() { return ZFS_ONLINE_FORCEFAULT; }
 int go_get_zfs_online_expand() { return ZFS_ONLINE_EXPAND; }
 
+// OpenZFS 2.3 added a mount thread-count argument to zpool_enable_datasets.
+// The headers carry no version macro; ZPOOL_CONFIG_RAIDZ_EXPANDING first
+// appeared in the same release (2.3.0-rc1), so it marks the new signature.
+// FreeBSD 14.x ships OpenZFS 2.2, FreeBSD 15.x ships 2.3+.
+#ifdef ZPOOL_CONFIG_RAIDZ_EXPANDING
+#define GO_ZPOOL_ENABLE_DATASETS(zhp) zpool_enable_datasets((zhp), NULL, 0, 1)
+#else
+#define GO_ZPOOL_ENABLE_DATASETS(zhp) zpool_enable_datasets((zhp), NULL, 0)
+#endif
+
 // Pool import. Return codes must stay in sync with importErr* in the driver.
 #define GO_IMPORT_OK              0
 #define GO_IMPORT_NOT_FOUND      -1  // no importable pool with that name
@@ -814,7 +824,7 @@ int go_zpool_import(libzfs_handle_t *hdl, const char *poolname,
         goto out;
     }
     if (zpool_get_state(zhp) != POOL_STATE_UNAVAIL &&
-        zpool_enable_datasets(zhp, NULL, 0, 1) != 0)
+        GO_ZPOOL_ENABLE_DATASETS(zhp) != 0)
         ret = GO_IMPORT_MOUNT_FAILED;
     zpool_close(zhp);
 
