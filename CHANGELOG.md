@@ -7,6 +7,8 @@ versions may contain breaking API changes; they are listed under "Changed".
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-10
+
 ### Added
 
 - ZFS user properties (names containing a colon, e.g. `microvm-runner:agent`):
@@ -120,6 +122,7 @@ versions may contain breaking API changes; they are listed under "Changed".
 First alpha release: client creation, driver abstraction with the libzfs cgo
 backend, and version probing.
 
-[Unreleased]: https://github.com/zombocoder/go-freebsd-libzfs/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/zombocoder/go-freebsd-libzfs/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/zombocoder/go-freebsd-libzfs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/zombocoder/go-freebsd-libzfs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/zombocoder/go-freebsd-libzfs/releases/tag/v0.1.0
