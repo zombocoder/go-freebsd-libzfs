@@ -100,8 +100,7 @@ func readUserProps(zhp *C.zfs_handle_t) map[string]UserPropertyInfo {
 // GetUserProperties returns all user properties of a dataset, including
 // values inherited from ancestors.
 func (d *libzfsDriver) GetUserProperties(ctx context.Context, datasetName string) (map[string]UserPropertyInfo, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return nil, fmt.Errorf("driver closed")
@@ -143,8 +142,7 @@ func go_userprops_iter_callback(zhp *C.zfs_handle_t, data unsafe.Pointer) C.int 
 // ListDescendantUserProps walks the filesystems and volumes below parent and
 // reads each one's user properties from its own handle, under one lock.
 func (d *libzfsDriver) ListDescendantUserProps(ctx context.Context, parent string) ([]ChildUserProps, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return nil, fmt.Errorf("driver closed")
@@ -163,13 +161,17 @@ func (d *libzfsDriver) ListDescendantUserProps(ctx context.Context, parent strin
 	}
 	defer C.zfs_close(zhp)
 
-	w := &userPropsWalk{}
-	h := cgo.NewHandle(w)
-	defer h.Delete()
-
 	errBefore := C.libzfs_errno(d.h)
-	if ret := C.userprops_walk(zhp, C.uintptr_t(h)); ret != 0 {
-		return nil, iterError("failed to iterate datasets below "+parent, d.h, errBefore)
+	for attempt := 1; ; attempt++ {
+		w := &userPropsWalk{}
+		h := cgo.NewHandle(w)
+		ret := C.userprops_walk(zhp, C.uintptr_t(h))
+		h.Delete()
+		if ret == 0 {
+			return w.result, nil
+		}
+		if attempt >= maxIterAttempts || C.libzfs_errno(d.h) != C.EZFS_INTR {
+			return nil, iterError("failed to iterate datasets below "+parent, d.h, errBefore)
+		}
 	}
-	return w.result, nil
 }

@@ -10,6 +10,8 @@ package cgo
 #include <sys/nvpair.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
+#include <pthread.h>
 
 // libzfs handle management
 libzfs_handle_t* go_libzfs_init(void) {
@@ -50,6 +52,32 @@ uint64_t go_zfs_get_guid(zfs_handle_t* zhp) {
 
 int go_zfs_get_type(zfs_handle_t* zhp) {
     return zfs_get_type(zhp);
+}
+
+// Signal masking. libzfs does not retry ioctls that fail with EINTR, and the
+// Go runtime signals threads (SIGURG for preemption, SIGPROF, ...) at any
+// time, including while a thread is inside libzfs. go_sigs_block blocks every
+// asynchronous signal on the calling thread and go_sigs_restore puts the
+// previous mask back. The caller must stay on the same OS thread in between
+// (runtime.LockOSThread). Synchronous fault signals stay unblocked so a
+// crash is still reported by the runtime instead of killing the process.
+static __thread sigset_t go_saved_sigmask;
+
+void go_sigs_block(void) {
+    sigset_t all;
+    sigfillset(&all);
+    sigdelset(&all, SIGSEGV);
+    sigdelset(&all, SIGBUS);
+    sigdelset(&all, SIGFPE);
+    sigdelset(&all, SIGILL);
+    sigdelset(&all, SIGTRAP);
+    sigdelset(&all, SIGABRT);
+    sigdelset(&all, SIGSYS);
+    pthread_sigmask(SIG_BLOCK, &all, &go_saved_sigmask);
+}
+
+void go_sigs_restore(void) {
+    pthread_sigmask(SIG_SETMASK, &go_saved_sigmask, NULL);
 }
 
 // Iteration handle accounting. libzfs hands every handle passed to an

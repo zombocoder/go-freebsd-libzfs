@@ -24,6 +24,10 @@ extern int go_iter_all_datasets(libzfs_handle_t* hdl, int (*func)(zfs_handle_t *
 extern int go_pool_iter_callback(zpool_handle_t *, void *);
 extern int go_dataset_iter_callback(zfs_handle_t *, void *);
 
+// Signal masking
+extern void go_sigs_block(void);
+extern void go_sigs_restore(void);
+
 // Iteration handle accounting
 extern void go_iter_given(void);
 extern void go_iter_close_zfs(zfs_handle_t* zhp);
@@ -200,8 +204,7 @@ func (d *libzfsDriver) finalize() {
 }
 
 func (d *libzfsDriver) Close() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h != nil {
 		C.go_libzfs_fini(d.h)
@@ -212,8 +215,7 @@ func (d *libzfsDriver) Close() error {
 }
 
 func (d *libzfsDriver) RuntimeInfo(ctx context.Context) (string, string, string, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return "", "", "", fmt.Errorf("driver closed")
@@ -285,20 +287,22 @@ func go_pool_iter_callback(zhp *C.zpool_handle_t, data unsafe.Pointer) C.int {
 }
 
 func (d *libzfsDriver) ListPools(ctx context.Context) ([]PoolInfo, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return nil, fmt.Errorf("driver closed")
 	}
 
-	iterData := &poolIterData{}
-
-	// Call C function to iterate pools
+	var iterData *poolIterData
 	errBefore := C.libzfs_errno(d.h)
-	ret := C.go_iter_pools(d.h, (*[0]byte)(C.go_pool_iter_callback), unsafe.Pointer(iterData))
-	if ret != 0 {
-		return nil, iterError("failed to iterate pools", d.h, errBefore)
+	for attempt := 1; ; attempt++ {
+		iterData = &poolIterData{}
+		if C.go_iter_pools(d.h, (*[0]byte)(C.go_pool_iter_callback), unsafe.Pointer(iterData)) == 0 {
+			break
+		}
+		if attempt >= maxIterAttempts || C.libzfs_errno(d.h) != C.EZFS_INTR {
+			return nil, iterError("failed to iterate pools", d.h, errBefore)
+		}
 	}
 
 	if iterData.err != nil {
@@ -309,8 +313,7 @@ func (d *libzfsDriver) ListPools(ctx context.Context) ([]PoolInfo, error) {
 }
 
 func (d *libzfsDriver) GetPoolProps(ctx context.Context, poolName string, propNames []string) (map[string]PropertyInfo, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return nil, fmt.Errorf("driver closed")
@@ -371,6 +374,26 @@ func (d *libzfsDriver) GetPoolProps(ctx context.Context, poolName string, propNa
 
 	return properties, nil
 }
+
+// enter serialises access to the libzfs handle and keeps asynchronous signals
+// away from the calling thread until the returned function is called, so
+// libzfs ioctls are not interrupted (EZFS_INTR) by Go runtime signals. Use as
+// "defer d.enter()()" at the top of every method that calls into libzfs.
+func (d *libzfsDriver) enter() func() {
+	d.mu.Lock()
+	runtime.LockOSThread()
+	C.go_sigs_block()
+	return func() {
+		C.go_sigs_restore()
+		runtime.UnlockOSThread()
+		d.mu.Unlock()
+	}
+}
+
+// maxIterAttempts bounds the retries of a read-only iteration that libzfs
+// reports as interrupted (EZFS_INTR) despite the signal mask, e.g. by a
+// signal sent to the whole process while another thread is in libzfs.
+const maxIterAttempts = 3
 
 // OutstandingIterHandles returns the number of libzfs handles received in
 // iteration callbacks and not closed yet. It is 0 whenever no iteration is
@@ -468,24 +491,28 @@ func (d *libzfsDriver) ListDatasetsInPool(ctx context.Context, poolName string, 
 // root dataset of each pool is returned; with recursive all filesystems,
 // volumes and snapshots are returned. dsType optionally filters by type.
 func (d *libzfsDriver) ListDatasetsByType(ctx context.Context, dsType *DatasetType, recursive bool) ([]DatasetInfo, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return nil, fmt.Errorf("driver closed")
 	}
 
-	iterData := &datasetIterData{}
-
+	var iterData *datasetIterData
 	errBefore := C.libzfs_errno(d.h)
-	var ret C.int
-	if recursive {
-		ret = C.go_iter_all_datasets(d.h, (*[0]byte)(C.go_dataset_iter_callback), unsafe.Pointer(iterData))
-	} else {
-		ret = C.go_iter_datasets(d.h, (*[0]byte)(C.go_dataset_iter_callback), unsafe.Pointer(iterData))
-	}
-	if ret != 0 {
-		return nil, iterError("failed to iterate datasets", d.h, errBefore)
+	for attempt := 1; ; attempt++ {
+		iterData = &datasetIterData{}
+		var ret C.int
+		if recursive {
+			ret = C.go_iter_all_datasets(d.h, (*[0]byte)(C.go_dataset_iter_callback), unsafe.Pointer(iterData))
+		} else {
+			ret = C.go_iter_datasets(d.h, (*[0]byte)(C.go_dataset_iter_callback), unsafe.Pointer(iterData))
+		}
+		if ret == 0 {
+			break
+		}
+		if attempt >= maxIterAttempts || C.libzfs_errno(d.h) != C.EZFS_INTR {
+			return nil, iterError("failed to iterate datasets", d.h, errBefore)
+		}
 	}
 
 	if iterData.err != nil {
@@ -511,8 +538,7 @@ func (d *libzfsDriver) ListDatasetsByType(ctx context.Context, dsType *DatasetTy
 }
 
 func (d *libzfsDriver) GetDatasetProps(ctx context.Context, datasetName string, propNames []string) (map[string]PropertyInfo, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return nil, fmt.Errorf("driver closed")
@@ -622,8 +648,7 @@ func cStringArray(strs []string) (**C.char, func()) {
 // DiscoverPools scans for pools that are not imported, like `zpool import`
 // without arguments. Results are sorted by name.
 func (d *libzfsDriver) DiscoverPools(ctx context.Context, opts DiscoverOptions) ([]ImportablePool, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return nil, fmt.Errorf("driver closed")
@@ -689,8 +714,7 @@ func (d *libzfsDriver) DiscoverPools(ctx context.Context, opts DiscoverOptions) 
 }
 
 func (d *libzfsDriver) ImportPool(ctx context.Context, poolName string, opts ImportOptions) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver closed")
@@ -766,8 +790,7 @@ const (
 )
 
 func (d *libzfsDriver) ExportPool(ctx context.Context, poolName string, opts ExportOptions) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver closed")
@@ -805,8 +828,7 @@ func (d *libzfsDriver) ExportPool(ctx context.Context, poolName string, opts Exp
 }
 
 func (d *libzfsDriver) CreatePool(ctx context.Context, poolName string, vdevs []string, opts CreateOptions) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver closed")
@@ -867,8 +889,7 @@ func (d *libzfsDriver) CreatePool(ctx context.Context, poolName string, vdevs []
 }
 
 func (d *libzfsDriver) DestroyPool(ctx context.Context, poolName string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver closed")
@@ -901,8 +922,7 @@ func (d *libzfsDriver) DestroyPool(ctx context.Context, poolName string) error {
 }
 
 func (d *libzfsDriver) CreateDataset(ctx context.Context, datasetName string, dsType DatasetType, props map[string]string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver closed")
@@ -941,8 +961,7 @@ func (d *libzfsDriver) CreateDataset(ctx context.Context, datasetName string, ds
 }
 
 func (d *libzfsDriver) SetDatasetProp(ctx context.Context, datasetName, propName, propValue string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver is closed")
@@ -972,8 +991,7 @@ func (d *libzfsDriver) SetDatasetProp(ctx context.Context, datasetName, propName
 }
 
 func (d *libzfsDriver) DestroyDataset(ctx context.Context, datasetName string, recursive bool) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver closed")
@@ -1010,8 +1028,7 @@ func (d *libzfsDriver) DestroyDataset(ctx context.Context, datasetName string, r
 }
 
 func (d *libzfsDriver) CreateSnapshot(ctx context.Context, snapshotName string, recursive bool, props map[string]string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver is closed")
@@ -1045,8 +1062,7 @@ func (d *libzfsDriver) CreateSnapshot(ctx context.Context, snapshotName string, 
 }
 
 func (d *libzfsDriver) DestroySnapshot(ctx context.Context, snapshotName string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver is closed")
@@ -1076,8 +1092,7 @@ func (d *libzfsDriver) DestroySnapshot(ctx context.Context, snapshotName string)
 }
 
 func (d *libzfsDriver) RollbackToSnapshot(ctx context.Context, datasetName, snapshotName string, force bool) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver is closed")
@@ -1133,8 +1148,7 @@ func (d *libzfsDriver) RollbackToSnapshot(ctx context.Context, datasetName, snap
 // Clone operations
 
 func (d *libzfsDriver) CreateClone(ctx context.Context, snapshotName, cloneName string, props map[string]string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver is closed")
@@ -1180,8 +1194,7 @@ func (d *libzfsDriver) CreateClone(ctx context.Context, snapshotName, cloneName 
 }
 
 func (d *libzfsDriver) PromoteClone(ctx context.Context, cloneName string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver is closed")
@@ -1221,8 +1234,7 @@ func (d *libzfsDriver) PromoteClone(ctx context.Context, cloneName string) error
 }
 
 func (d *libzfsDriver) GetCloneInfo(ctx context.Context, datasetName string) (*CloneInfo, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return nil, fmt.Errorf("driver is closed")
@@ -1275,8 +1287,7 @@ func (d *libzfsDriver) GetCloneInfo(ctx context.Context, datasetName string) (*C
 }
 
 func (d *libzfsDriver) ListClones(ctx context.Context, snapshotName string) ([]string, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return nil, fmt.Errorf("driver is closed")
@@ -1298,8 +1309,7 @@ func (d *libzfsDriver) ListClones(ctx context.Context, snapshotName string) ([]s
 }
 
 func (d *libzfsDriver) DestroyClone(ctx context.Context, cloneName string, force bool) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver is closed")
@@ -1366,8 +1376,7 @@ func (d *libzfsDriver) getCloneList(zhp *C.zfs_handle_t) ([]string, error) {
 // Vdev management operations
 
 func (d *libzfsDriver) AddVdev(ctx context.Context, poolName string, vdevSpec VdevSpec) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver is closed")
@@ -1404,8 +1413,7 @@ func (d *libzfsDriver) AddVdev(ctx context.Context, poolName string, vdevSpec Vd
 }
 
 func (d *libzfsDriver) AttachVdev(ctx context.Context, poolName, oldDevice, newDevice string, replacing bool) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver is closed")
@@ -1446,8 +1454,7 @@ func (d *libzfsDriver) AttachVdev(ctx context.Context, poolName, oldDevice, newD
 }
 
 func (d *libzfsDriver) DetachVdev(ctx context.Context, poolName, device string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver is closed")
@@ -1481,8 +1488,7 @@ func (d *libzfsDriver) DetachVdev(ctx context.Context, poolName, device string) 
 }
 
 func (d *libzfsDriver) ReplaceVdev(ctx context.Context, poolName, oldDevice, newDevice string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver is closed")
@@ -1518,8 +1524,7 @@ func (d *libzfsDriver) ReplaceVdev(ctx context.Context, poolName, oldDevice, new
 }
 
 func (d *libzfsDriver) RemoveVdev(ctx context.Context, poolName, device string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver is closed")
@@ -1553,8 +1558,7 @@ func (d *libzfsDriver) RemoveVdev(ctx context.Context, poolName, device string) 
 }
 
 func (d *libzfsDriver) OnlineVdev(ctx context.Context, poolName, device string, flags VdevOnlineFlags) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver is closed")
@@ -1604,8 +1608,7 @@ func (d *libzfsDriver) OnlineVdev(ctx context.Context, poolName, device string, 
 }
 
 func (d *libzfsDriver) OfflineVdev(ctx context.Context, poolName, device string, temporary bool) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver is closed")
@@ -1644,8 +1647,7 @@ func (d *libzfsDriver) OfflineVdev(ctx context.Context, poolName, device string,
 }
 
 func (d *libzfsDriver) ClearVdev(ctx context.Context, poolName, device string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver is closed")
@@ -1779,8 +1781,7 @@ func (d *libzfsDriver) createRaidzVdev(devices []string, parity int) (unsafe.Poi
 }
 
 func (d *libzfsDriver) SupportsFeature(ctx context.Context, feature string) (bool, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return false, fmt.Errorf("driver is closed")
@@ -1845,8 +1846,7 @@ func (d *libzfsDriver) checkZFSFeature(feature string) (bool, error) {
 }
 
 func (d *libzfsDriver) GetAvailableFeatures(ctx context.Context) ([]string, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return nil, fmt.Errorf("driver is closed")
@@ -1892,8 +1892,7 @@ func (d *libzfsDriver) GetAvailableFeatures(ctx context.Context) ([]string, erro
 }
 
 func (d *libzfsDriver) GetSupportedCompressionAlgorithms(ctx context.Context) ([]string, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return nil, fmt.Errorf("driver is closed")
@@ -1932,8 +1931,7 @@ func (d *libzfsDriver) GetSupportedCompressionAlgorithms(ctx context.Context) ([
 }
 
 func (d *libzfsDriver) GetZFSVersion(ctx context.Context) (string, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return "", fmt.Errorf("driver is closed")
