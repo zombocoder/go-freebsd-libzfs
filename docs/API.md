@@ -310,6 +310,27 @@ for name, prop := range props {
 }
 ```
 
+Each `Property` carries `Value` (the text libzfs prints, e.g. `"439G"`) and,
+for numeric properties (`used`, `available`, `refreservation`, `volsize`,
+`quota`, ...), `Numeric` with the exact value (bytes for sizes) and
+`IsNumeric == true`. `GetUint64Property` returns the exact value.
+
+Units follow the property: bytes for sizes, seconds since the epoch for times
+(`creation`), percent times 100 for `compressratio`, plain counts and ids
+(`guid`, `copies`). For `quota`, `reservation`, `refquota` and `refreservation`
+a `Numeric` of 0 means "none"; check `Value` (`"none"`) to tell it from a real
+value.
+
+Operations on a dataset, snapshot or clone that does not exist return an error
+for which `errors.Is(err, errors.ErrDatasetNotFound)` is true. The same holds
+for creating a snapshot of a missing dataset and a dataset or clone under a
+missing parent; for `CreateClone` it covers both a missing source snapshot and
+a missing parent of the clone.
+
+Names containing a colon are user properties; an unset one is left out of the
+result. A name that is neither a native ZFS property nor a user property fails
+with `errors.ErrInvalidArgument`.
+
 ### client.GetStringProperty(ctx context.Context, dataset, property string) (string, error)
 
 Gets a property value as a string (convenience method).
@@ -331,6 +352,33 @@ if err != nil {
     return fmt.Errorf("failed to set compression: %w", err)
 }
 ```
+
+### User properties
+
+User properties have names containing a colon (`<prefix>:<key>`, lowercase
+letters, digits and `-_.:` only, under 256 bytes; values under 8192 bytes, no
+NUL). They are set with `SetProperty`, `Create*`, `CreateSnapshot` or
+`CreateClone`; invalid names or values fail with `errors.ErrInvalidArgument`
+(`errors.ErrNameTooLong` when the name is too long).
+
+```go
+type UserProperty struct {
+    Value  string
+    Source PropertySource // local, inherited or received
+}
+
+func (c *Client) GetUserProperty(ctx, dataset, name string) (value string, ok bool, err error)
+func (c *Client) UserProperties(ctx, dataset string) (map[string]UserProperty, error)
+func (c *Client) GetLocalUserProperty(ctx, dataset, name string) (value string, ok bool, err error)
+func (c *Client) FindByUserProperty(ctx, parent, name, value string) ([]Dataset, error)
+```
+
+`GetUserProperty` returns `ok == false` with a nil error when the property is
+not set (inherited values count, so do not use it for ownership checks).
+`GetLocalUserProperty` reports `ok` only for values set on the dataset itself.
+`FindByUserProperty` lists filesystems and
+volumes below `parent` on which the property is set locally to `value`, in one
+walk of the subtree; it returns `errors.ErrDatasetNotFound` if `parent` is missing.
 
 ## Version and Capabilities
 

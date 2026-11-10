@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/zombocoder/go-freebsd-libzfs/errors"
 	"github.com/zombocoder/go-freebsd-libzfs/internal/driver"
 )
 
@@ -167,7 +168,7 @@ func (c *Client) Get(ctx context.Context, name string) (*Dataset, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("dataset %q not found", name)
+	return nil, fmt.Errorf("dataset %q not found: %w", name, errors.ErrDatasetNotFound)
 }
 
 // Property represents a dataset property with its value and metadata
@@ -176,6 +177,16 @@ type Property[T any] struct {
 	Value    T
 	Source   PropertySource
 	Received bool
+
+	// Numeric is the exact value of a numeric property (used, available,
+	// refreservation, volsize, ...). The unit depends on the property: bytes
+	// for sizes, seconds for times, percent*100 for compressratio, plain
+	// counts and ids otherwise. For quota, reservation, refquota and
+	// refreservation 0 means "none"; check Value to tell. IsNumeric is false
+	// for string and index properties (mountpoint, compression). Value
+	// remains the human-readable text such as "439G".
+	Numeric   uint64
+	IsNumeric bool
 }
 
 // PropertySource indicates where a property value originates
@@ -248,10 +259,22 @@ const (
 	PropertyNameKeystatus     = "keystatus"
 )
 
-// GetProperties retrieves multiple properties for a dataset
+// GetProperties retrieves multiple properties for a dataset.
+//
+// Names containing a colon are user properties; a user property that is not
+// set is left out of the result. Any other name must be a native ZFS property
+// or the call fails with errors.ErrInvalidArgument. Native properties that do
+// not apply to the dataset (e.g. volsize on a filesystem) are left out.
 func (c *Client) GetProperties(ctx context.Context, datasetName string, propNames ...string) (map[string]Property[any], error) {
 	if c.d == nil {
 		return nil, fmt.Errorf("client is closed")
+	}
+	for _, name := range propNames {
+		if isUserPropertyName(name) {
+			if err := validateUserPropertyName(name); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	propInfos, err := c.d.GetDatasetProps(ctx, datasetName, propNames)
@@ -266,6 +289,9 @@ func (c *Client) GetProperties(ctx context.Context, datasetName string, propName
 			Value:    info.Value,
 			Source:   PropertySource(info.Source.String()),
 			Received: info.Received,
+
+			Numeric:   info.Numeric,
+			IsNumeric: info.IsNumeric,
 		}
 		properties[name] = prop
 	}
@@ -292,7 +318,9 @@ func (c *Client) GetStringProperty(ctx context.Context, datasetName, propName st
 	return fmt.Sprintf("%v", prop.Value), nil
 }
 
-// GetUint64Property retrieves a uint64 property value
+// GetUint64Property retrieves the exact value of a numeric property (used,
+// available, refreservation, volsize, ...), in bytes for sizes. It fails for
+// string and index properties such as mountpoint or compression.
 func (c *Client) GetUint64Property(ctx context.Context, datasetName, propName string) (uint64, error) {
 	props, err := c.GetProperties(ctx, datasetName, propName)
 	if err != nil {
@@ -304,11 +332,11 @@ func (c *Client) GetUint64Property(ctx context.Context, datasetName, propName st
 		return 0, fmt.Errorf("property %q not found", propName)
 	}
 
-	if val, ok := prop.Value.(uint64); ok {
-		return val, nil
+	if prop.IsNumeric {
+		return prop.Numeric, nil
 	}
 
-	return 0, fmt.Errorf("property %q is not a uint64", propName)
+	return 0, fmt.Errorf("property %q is not numeric", propName)
 }
 
 // GetBoolProperty retrieves a boolean property value
@@ -332,6 +360,12 @@ func (c *Client) GetBoolProperty(ctx context.Context, datasetName, propName stri
 func (c *Client) SetProperty(ctx context.Context, datasetName, propName, propValue string) error {
 	if c.d == nil {
 		return fmt.Errorf("client is closed")
+	}
+
+	if isUserPropertyName(propName) {
+		if err := validateUserProperty(propName, propValue); err != nil {
+			return err
+		}
 	}
 
 	return c.d.SetDatasetProp(ctx, datasetName, propName, propValue)
@@ -426,6 +460,10 @@ func (c *Client) Create(ctx context.Context, datasetName string, dsType DatasetT
 		return fmt.Errorf("unsupported dataset type for creation: %s", dsType)
 	}
 
+	if err := validateUserProperties(opts.Properties); err != nil {
+		return err
+	}
+
 	return c.d.CreateDataset(ctx, datasetName, driverType, opts.Properties)
 }
 
@@ -457,6 +495,10 @@ func (c *Client) Destroy(ctx context.Context, datasetName string, recursive bool
 func (c *Client) CreateSnapshot(ctx context.Context, snapshotName string, recursive bool, properties map[string]string) error {
 	if c.d == nil {
 		return fmt.Errorf("client is closed")
+	}
+
+	if err := validateUserProperties(properties); err != nil {
+		return err
 	}
 
 	return c.d.CreateSnapshot(ctx, snapshotName, recursive, properties)
@@ -501,6 +543,10 @@ type Clone struct {
 func (c *Client) CreateClone(ctx context.Context, snapshotName, cloneName string, properties map[string]string) error {
 	if c.d == nil {
 		return fmt.Errorf("client is closed")
+	}
+
+	if err := validateUserProperties(properties); err != nil {
+		return err
 	}
 
 	return c.d.CreateClone(ctx, snapshotName, cloneName, properties)

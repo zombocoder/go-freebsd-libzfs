@@ -7,6 +7,68 @@ versions may contain breaking API changes; they are listed under "Changed".
 
 ## [Unreleased]
 
+### Added
+
+- ZFS user properties (names containing a colon, e.g. `microvm-runner:agent`):
+  `zfs.Client.GetUserProperty`, `UserProperties` (value and source:
+  local, inherited or received), `GetLocalUserProperty` (only values set on
+  the dataset itself) and `FindByUserProperty` (filesystems and volumes below
+  a parent whose user property is set locally to a value; one walk of the
+  subtree, tolerates concurrent destroys, `ErrDatasetNotFound` if the parent
+  is missing). `GetUserProperty` also returns inherited values: use the
+  local variants for ownership checks.
+- `GetProperties` returns user properties when asked for them by name; an
+  unset one is left out of the result.
+- `GetProperties` now reads any native ZFS property (previously only nine
+  were known), e.g. `atime`, `refreservation`, `volsize`. Values up to 8192
+  bytes are no longer truncated at 1024.
+- User property names are validated like `zfs_prop_user()` (a colon, only
+  lowercase letters, digits and `-_.:`, shorter than 256 bytes; values
+  shorter than 8192 bytes without NUL bytes) in `SetProperty`, `Create*`,
+  `CreateSnapshot` and `CreateClone`, failing with
+  `errors.ErrInvalidArgument` or `errors.ErrNameTooLong`.
+- Tests for setting user properties with `SetProperty` and for `CreateClone`
+  with user properties and `refreservation`.
+
+### Fixed
+
+- `GetUint64Property` could never succeed: numeric properties came back only
+  as text ("439G"). `Property` now has `Numeric` (exact value, bytes for
+  sizes, read with `zfs_prop_get_numeric`) and `IsNumeric`; `Value` keeps the
+  human-readable text, so existing callers are unaffected. `GetUint64Property`
+  returns the exact value and fails for non-numeric properties.
+- Missing datasets: opening, getting, setting properties on, destroying (also
+  snapshots and clones) or cloning from a dataset or snapshot that does not
+  exist, creating a snapshot of a missing dataset or a dataset or clone under a
+  missing parent now returns an error matching `errors.ErrDatasetNotFound`
+  (`errors.Is`), so "already gone" can be treated as success. For
+  `CreateClone` it covers both a missing source snapshot and a missing parent
+  of the clone. `Client.Get` also wraps it. The message text is unchanged.
+- Spurious `signal received` (`EZFS_INTR`) failures: libzfs does not retry an
+  ioctl interrupted by a signal, and the Go runtime signals threads at any
+  time (preemption, GC). Every driver operation now blocks asynchronous
+  signals on its thread while it is inside libzfs, and read-only listings
+  (pools, datasets, user-property walks) are repeated, up to three attempts in
+  all, when libzfs still reports an interruption.
+- Handle leak in dataset and pool listing: libzfs passes each handle to the
+  iteration callback, which must close it; `List`, `ListInPool`,
+  `ListSnapshots`, `zpool.Client.List` and friends never did, leaking one
+  libzfs handle per dataset/pool per call.
+- A failed pool or dataset iteration reports libzfs's error only if libzfs
+  raised a new one during the iteration; otherwise it says the iteration was
+  aborted, instead of repeating an old error.
+
+### Changed
+
+- Behaviour change: `GetProperties` with a name that is neither a native ZFS
+  property nor a user property now fails with `errors.ErrInvalidArgument`;
+  it used to silently omit the name. This includes `@` properties such as
+  `userused@<user>` and `written@<snap>`, which are not supported. Valid native properties that do not apply
+  to the dataset (e.g. `volsize` on a filesystem) are still omitted.
+- `internal/driver.Driver` gained `GetUserProperties` and
+  `ListDescendantUserProps` (the ioctl driver
+  returns "not implemented", like its other methods).
+
 ## [0.2.0] - 2026-11-08
 
 ### Added

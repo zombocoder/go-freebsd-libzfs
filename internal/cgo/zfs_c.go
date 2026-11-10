@@ -10,6 +10,8 @@ package cgo
 #include <sys/nvpair.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
+#include <pthread.h>
 
 // libzfs handle management
 libzfs_handle_t* go_libzfs_init(void) {
@@ -52,21 +54,96 @@ int go_zfs_get_type(zfs_handle_t* zhp) {
     return zfs_get_type(zhp);
 }
 
-// Pool iteration helpers
+// Signal masking. libzfs does not retry ioctls that fail with EINTR, and the
+// Go runtime signals threads (SIGURG for preemption, SIGPROF, ...) at any
+// time, including while a thread is inside libzfs. go_sigs_block blocks every
+// asynchronous signal on the calling thread and returns the previous mask in
+// malloc'd storage (NULL if the mask could not be changed); go_sigs_restore
+// puts that mask back, frees it and returns 0 on success. The caller must
+// stay on the same OS thread in between (runtime.LockOSThread). Synchronous
+// fault signals stay unblocked so a crash is still reported by the runtime
+// instead of killing the process.
+void* go_sigs_block(void) {
+    sigset_t all;
+    sigset_t *old = malloc(sizeof(*old));
+    if (old == NULL)
+        return NULL;
+    sigfillset(&all);
+    sigdelset(&all, SIGSEGV);
+    sigdelset(&all, SIGBUS);
+    sigdelset(&all, SIGFPE);
+    sigdelset(&all, SIGILL);
+    sigdelset(&all, SIGTRAP);
+    sigdelset(&all, SIGABRT);
+    sigdelset(&all, SIGSYS);
+    if (pthread_sigmask(SIG_BLOCK, &all, old) != 0) {
+        free(old);
+        return NULL;
+    }
+    return old;
+}
+
+int go_sigs_restore(void *saved) {
+    if (saved == NULL)
+        return 0;
+    int rc = pthread_sigmask(SIG_SETMASK, (sigset_t *)saved, NULL);
+    free(saved);
+    return rc;
+}
+
+// Iteration handle accounting. libzfs hands every handle passed to an
+// iteration callback over to the callback, which must close it (zpool_iter,
+// zfs_iter_root, zfs_iter_children, zfs_iter_filesystems, zfs_iter_snapshots).
+// go_iter_given records a handle received, go_iter_close_* closes it and
+// records that; go_iter_outstanding is the number not closed yet (0 when
+// nothing leaked).
+static long iter_handles_out = 0;
+
+void go_iter_given(void) {
+    __atomic_add_fetch(&iter_handles_out, 1, __ATOMIC_SEQ_CST);
+}
+
+void go_iter_close_zfs(zfs_handle_t* zhp) {
+    zfs_close(zhp);
+    __atomic_sub_fetch(&iter_handles_out, 1, __ATOMIC_SEQ_CST);
+}
+
+void go_iter_close_zpool(zpool_handle_t* zhp) {
+    zpool_close(zhp);
+    __atomic_sub_fetch(&iter_handles_out, 1, __ATOMIC_SEQ_CST);
+}
+
+long go_iter_outstanding(void) {
+    return __atomic_load_n(&iter_handles_out, __ATOMIC_SEQ_CST);
+}
+
+// Pool iteration helpers. The callback owns (and must close) the handle.
 int go_iter_pools(libzfs_handle_t* hdl, int (*func)(zpool_handle_t *, void *), void* data) {
     return zpool_iter(hdl, func, data);
 }
 
-// Dataset iteration helpers - only iterate datasets, not snapshots
-int go_iter_datasets(libzfs_handle_t* hdl, int (*func)(zfs_handle_t *, void *), void* data) {
-    return zfs_iter_root(hdl, func, data);
-}
-
-// Context for comprehensive iteration
+// Context for iteration with a Go callback
 typedef struct {
     int (*callback)(zfs_handle_t *, void *);
     void* user_data;
 } comprehensive_iter_ctx_t;
+
+// Calls the callback, then closes the handle: for iterations where the
+// callback does not need the handle afterwards.
+static int closing_iter_func(zfs_handle_t* zhp, void* ctx_ptr) {
+    comprehensive_iter_ctx_t* ctx = (comprehensive_iter_ctx_t*)ctx_ptr;
+    go_iter_given();
+    int ret = ctx->callback(zhp, ctx->user_data);
+    go_iter_close_zfs(zhp);
+    return ret;
+}
+
+// Dataset iteration helpers - only iterate datasets, not snapshots.
+// The callback only reads the handle; it is closed here.
+int go_iter_datasets(libzfs_handle_t* hdl, int (*func)(zfs_handle_t *, void *), void* data) {
+    comprehensive_iter_ctx_t ctx = { .callback = func, .user_data = data };
+    return zfs_iter_root(hdl, closing_iter_func, &ctx);
+}
 
 // Forward declaration
 static int comprehensive_iter_func(zfs_handle_t* zhp, void* ctx_ptr);
@@ -77,34 +154,31 @@ int go_iter_all_datasets(libzfs_handle_t* hdl, int (*func)(zfs_handle_t *, void 
     return zfs_iter_root(hdl, comprehensive_iter_func, &ctx);
 }
 
-// Recursive function that iterates datasets, children, and snapshots
+// Recursive function that iterates datasets, children, and snapshots. It owns
+// zhp and closes it on every path.
 static int comprehensive_iter_func(zfs_handle_t* zhp, void* ctx_ptr) {
     comprehensive_iter_ctx_t* ctx = (comprehensive_iter_ctx_t*)ctx_ptr;
     int ret;
     int zfs_type = zfs_get_type(zhp);
 
+    go_iter_given();
+
     // Process this dataset first
     ret = ctx->callback(zhp, ctx->user_data);
-    if (ret != 0) {
-        return ret;
-    }
 
     // Only process children and snapshots for non-snapshot datasets
-    if (zfs_type != ZFS_TYPE_SNAPSHOT) {
+    if (ret == 0 && zfs_type != ZFS_TYPE_SNAPSHOT) {
         // Process all child datasets (filesystems and volumes) recursively
         ret = zfs_iter_children(zhp, comprehensive_iter_func, ctx);
-        if (ret != 0) {
-            return ret;
-        }
 
         // Process snapshots of this dataset
-        ret = zfs_iter_snapshots(zhp, B_FALSE, ctx->callback, ctx->user_data, 0, 0);
-        if (ret != 0) {
-            return ret;
+        if (ret == 0) {
+            ret = zfs_iter_snapshots(zhp, B_FALSE, closing_iter_func, ctx, 0, 0);
         }
     }
 
-    return 0;
+    go_iter_close_zfs(zhp);
+    return ret;
 }
 
 // Pool state and health helpers

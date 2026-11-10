@@ -30,6 +30,8 @@ import "C"
 import (
 	"fmt"
 	"unsafe"
+
+	zerrors "github.com/zombocoder/go-freebsd-libzfs/errors"
 )
 
 // Helper function to convert C strings safely
@@ -191,7 +193,7 @@ func (d *libzfsDriver) openDatasetHandle(datasetName string) (*C.zfs_handle_t, e
 		if zhp == nil {
 			errno := C.go_libzfs_errno(d.h)
 			desc := C.GoString(C.go_libzfs_error_description(d.h))
-			return nil, fmt.Errorf("failed to open dataset %s (errno %d): %s", datasetName, errno, desc)
+			return nil, notFound(int(errno), fmt.Errorf("failed to open dataset %s (errno %d): %s", datasetName, errno, desc))
 		}
 	}
 
@@ -218,4 +220,22 @@ func (d *libzfsDriver) getLibzfsError() (int, string) {
 	errno := C.go_libzfs_errno(d.h)
 	desc := C.GoString(C.go_libzfs_error_description(d.h))
 	return int(errno), desc
+}
+
+// notFoundError is a libzfs failure caused by a missing dataset. It keeps the
+// libzfs message and matches errors.ErrDatasetNotFound with errors.Is.
+type notFoundError struct{ err error }
+
+func (e *notFoundError) Error() string { return e.err.Error() }
+func (e *notFoundError) Unwrap() []error {
+	return []error{e.err, zerrors.ErrDatasetNotFound}
+}
+
+// notFound wraps err so it matches errors.ErrDatasetNotFound when libzfs
+// reported EZFS_NOENT; any other errno leaves err unchanged.
+func notFound(errno int, err error) error {
+	if errno == int(C.EZFS_NOENT) {
+		return &notFoundError{err: err}
+	}
+	return err
 }

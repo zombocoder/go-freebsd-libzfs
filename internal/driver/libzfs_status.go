@@ -35,8 +35,7 @@ const (
 )
 
 func (d *libzfsDriver) GetPoolStatus(ctx context.Context, poolName string) (*PoolStatus, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return nil, fmt.Errorf("driver closed")
@@ -157,8 +156,7 @@ func (d *libzfsDriver) vdevStatus(zhp *C.zpool_handle_t, nv *C.nvlist_t, spare b
 // ScrubPool starts (or resumes), pauses or stops a scrub, like `zpool scrub`,
 // `zpool scrub -p` and `zpool scrub -s`.
 func (d *libzfsDriver) ScrubPool(ctx context.Context, poolName string, cmd ScrubCommand) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	defer d.enter()()
 
 	if d.h == nil {
 		return fmt.Errorf("driver closed")
