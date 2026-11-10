@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/zombocoder/go-freebsd-libzfs/errors"
 	"github.com/zombocoder/go-freebsd-libzfs/internal/driver"
 )
 
@@ -167,7 +168,7 @@ func (c *Client) Get(ctx context.Context, name string) (*Dataset, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("dataset %q not found", name)
+	return nil, fmt.Errorf("dataset %q not found: %w", name, errors.ErrDatasetNotFound)
 }
 
 // Property represents a dataset property with its value and metadata
@@ -176,6 +177,13 @@ type Property[T any] struct {
 	Value    T
 	Source   PropertySource
 	Received bool
+
+	// Numeric is the exact value of a numeric property (used, available,
+	// refreservation, volsize, ...) in its base unit, e.g. bytes. IsNumeric
+	// is false for string and index properties (mountpoint, compression).
+	// Value remains the human-readable text such as "439G".
+	Numeric   uint64
+	IsNumeric bool
 }
 
 // PropertySource indicates where a property value originates
@@ -278,6 +286,9 @@ func (c *Client) GetProperties(ctx context.Context, datasetName string, propName
 			Value:    info.Value,
 			Source:   PropertySource(info.Source.String()),
 			Received: info.Received,
+
+			Numeric:   info.Numeric,
+			IsNumeric: info.IsNumeric,
 		}
 		properties[name] = prop
 	}
@@ -304,7 +315,9 @@ func (c *Client) GetStringProperty(ctx context.Context, datasetName, propName st
 	return fmt.Sprintf("%v", prop.Value), nil
 }
 
-// GetUint64Property retrieves a uint64 property value
+// GetUint64Property retrieves the exact value of a numeric property (used,
+// available, refreservation, volsize, ...), in bytes for sizes. It fails for
+// string and index properties such as mountpoint or compression.
 func (c *Client) GetUint64Property(ctx context.Context, datasetName, propName string) (uint64, error) {
 	props, err := c.GetProperties(ctx, datasetName, propName)
 	if err != nil {
@@ -316,11 +329,11 @@ func (c *Client) GetUint64Property(ctx context.Context, datasetName, propName st
 		return 0, fmt.Errorf("property %q not found", propName)
 	}
 
-	if val, ok := prop.Value.(uint64); ok {
-		return val, nil
+	if prop.IsNumeric {
+		return prop.Numeric, nil
 	}
 
-	return 0, fmt.Errorf("property %q is not a uint64", propName)
+	return 0, fmt.Errorf("property %q is not numeric", propName)
 }
 
 // GetBoolProperty retrieves a boolean property value

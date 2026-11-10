@@ -6,6 +6,7 @@ package driver
 #cgo CFLAGS: -I/usr/src/sys/contrib/openzfs/lib/libspl/include -I/usr/src/sys/contrib/openzfs/lib/libspl/include/os/freebsd -I/usr/src/sys/contrib/openzfs/include
 #cgo LDFLAGS: -lzfs -lnvpair
 #include <libzfs.h>
+#include <zfs_prop.h>
 #include <sys/nvpair.h>
 #include <stdlib.h>
 
@@ -582,7 +583,7 @@ func (d *libzfsDriver) GetDatasetProps(ctx context.Context, datasetName string, 
 	if zhp == nil {
 		errno := C.go_libzfs_errno(d.h)
 		desc := C.GoString(C.go_libzfs_error_description(d.h))
-		return nil, fmt.Errorf("failed to open dataset %s (errno %d): %s", datasetName, errno, desc)
+		return nil, notFound(int(errno), fmt.Errorf("failed to open dataset %s (errno %d): %s", datasetName, errno, desc))
 	}
 	defer C.zfs_close(zhp)
 
@@ -644,12 +645,23 @@ func (d *libzfsDriver) GetDatasetProps(ctx context.Context, datasetName string, 
 		var src C.int
 		ret := C.go_get_zfs_property(zhp, propValue, (*C.char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)), &src)
 		if ret == 0 {
-			properties[propName] = PropertyInfo{
+			info := PropertyInfo{
 				Name:     propName,
 				Value:    C.GoString((*C.char)(unsafe.Pointer(&buf[0]))),
 				Source:   mapPropSource(src),
 				Received: false,
 			}
+			// Numeric properties also carry their exact value; the string
+			// above is the human-readable form ("439G").
+			if C.zfs_prop_get_type(C.zfs_prop_t(propValue)) == C.PROP_TYPE_NUMBER {
+				var num C.uint64_t
+				var numSrc C.zprop_source_t
+				if C.zfs_prop_get_numeric(zhp, C.zfs_prop_t(propValue), &num, &numSrc, nil, 0) == 0 {
+					info.Numeric = uint64(num)
+					info.IsNumeric = true
+				}
+			}
+			properties[propName] = info
 		}
 	}
 
@@ -1014,7 +1026,7 @@ func (d *libzfsDriver) SetDatasetProp(ctx context.Context, datasetName, propName
 	ret := C.go_zfs_prop_set(zhp, cPropName, cPropValue)
 	if ret != 0 {
 		errno, desc := d.getLibzfsError()
-		return fmt.Errorf("failed to set property %s=%s on dataset %s (errno %d): %s", propName, propValue, datasetName, errno, desc)
+		return notFound(int(errno), fmt.Errorf("failed to set property %s=%s on dataset %s (errno %d): %s", propName, propValue, datasetName, errno, desc))
 	}
 
 	return nil
@@ -1036,7 +1048,7 @@ func (d *libzfsDriver) DestroyDataset(ctx context.Context, datasetName string, r
 	if zhp == nil {
 		errno := C.go_libzfs_errno(d.h)
 		desc := C.GoString(C.go_libzfs_error_description(d.h))
-		return fmt.Errorf("failed to open dataset %s for destruction (errno %d): %s", datasetName, errno, desc)
+		return notFound(int(errno), fmt.Errorf("failed to open dataset %s for destruction (errno %d): %s", datasetName, errno, desc))
 	}
 	defer C.zfs_close(zhp)
 
@@ -1051,7 +1063,7 @@ func (d *libzfsDriver) DestroyDataset(ctx context.Context, datasetName string, r
 	if ret != 0 {
 		errno := C.go_libzfs_errno(d.h)
 		desc := C.GoString(C.go_libzfs_error_description(d.h))
-		return fmt.Errorf("failed to destroy dataset %s (errno %d): %s", datasetName, errno, desc)
+		return notFound(int(errno), fmt.Errorf("failed to destroy dataset %s (errno %d): %s", datasetName, errno, desc))
 	}
 
 	return nil
@@ -1106,7 +1118,7 @@ func (d *libzfsDriver) DestroySnapshot(ctx context.Context, snapshotName string)
 	if zhp == nil {
 		errno := C.go_libzfs_errno(d.h)
 		desc := C.GoString(C.go_libzfs_error_description(d.h))
-		return fmt.Errorf("failed to open snapshot %s (errno %d): %s", snapshotName, errno, desc)
+		return notFound(int(errno), fmt.Errorf("failed to open snapshot %s (errno %d): %s", snapshotName, errno, desc))
 	}
 	defer C.zfs_close(zhp)
 
@@ -1115,7 +1127,7 @@ func (d *libzfsDriver) DestroySnapshot(ctx context.Context, snapshotName string)
 	if ret != 0 {
 		errno := C.go_libzfs_errno(d.h)
 		desc := C.GoString(C.go_libzfs_error_description(d.h))
-		return fmt.Errorf("failed to destroy snapshot %s (errno %d): %s", snapshotName, errno, desc)
+		return notFound(int(errno), fmt.Errorf("failed to destroy snapshot %s (errno %d): %s", snapshotName, errno, desc))
 	}
 
 	return nil
@@ -1140,7 +1152,7 @@ func (d *libzfsDriver) RollbackToSnapshot(ctx context.Context, datasetName, snap
 		if zhp == nil {
 			errno := C.go_libzfs_errno(d.h)
 			desc := C.GoString(C.go_libzfs_error_description(d.h))
-			return fmt.Errorf("failed to open dataset %s (errno %d): %s", datasetName, errno, desc)
+			return notFound(int(errno), fmt.Errorf("failed to open dataset %s (errno %d): %s", datasetName, errno, desc))
 		}
 	}
 	defer C.zfs_close(zhp)
@@ -1153,7 +1165,7 @@ func (d *libzfsDriver) RollbackToSnapshot(ctx context.Context, datasetName, snap
 	if snapzhp == nil {
 		errno := C.go_libzfs_errno(d.h)
 		desc := C.GoString(C.go_libzfs_error_description(d.h))
-		return fmt.Errorf("failed to open snapshot %s (errno %d): %s", snapshotName, errno, desc)
+		return notFound(int(errno), fmt.Errorf("failed to open snapshot %s (errno %d): %s", snapshotName, errno, desc))
 	}
 	defer C.zfs_close(snapzhp)
 
@@ -1217,7 +1229,7 @@ func (d *libzfsDriver) CreateClone(ctx context.Context, snapshotName, cloneName 
 	if ret != 0 {
 		errno := C.go_libzfs_errno(d.h)
 		desc := C.GoString(C.go_libzfs_error_description(d.h))
-		return fmt.Errorf("failed to create clone %s from snapshot %s (errno %d): %s", cloneName, snapshotName, errno, desc)
+		return notFound(int(errno), fmt.Errorf("failed to create clone %s from snapshot %s (errno %d): %s", cloneName, snapshotName, errno, desc))
 	}
 
 	return nil
@@ -1241,7 +1253,7 @@ func (d *libzfsDriver) PromoteClone(ctx context.Context, cloneName string) error
 		if zhp == nil {
 			errno := C.go_libzfs_errno(d.h)
 			desc := C.GoString(C.go_libzfs_error_description(d.h))
-			return fmt.Errorf("failed to open clone %s (errno %d): %s", cloneName, errno, desc)
+			return notFound(int(errno), fmt.Errorf("failed to open clone %s (errno %d): %s", cloneName, errno, desc))
 		}
 	}
 	defer C.zfs_close(zhp)
@@ -1278,7 +1290,7 @@ func (d *libzfsDriver) GetCloneInfo(ctx context.Context, datasetName string) (*C
 	if zhp == nil {
 		errno := C.go_libzfs_errno(d.h)
 		desc := C.GoString(C.go_libzfs_error_description(d.h))
-		return nil, fmt.Errorf("failed to open dataset %s (errno %d): %s", datasetName, errno, desc)
+		return nil, notFound(int(errno), fmt.Errorf("failed to open dataset %s (errno %d): %s", datasetName, errno, desc))
 	}
 	defer C.zfs_close(zhp)
 
@@ -1331,7 +1343,7 @@ func (d *libzfsDriver) ListClones(ctx context.Context, snapshotName string) ([]s
 	if zhp == nil {
 		errno := C.go_libzfs_errno(d.h)
 		desc := C.GoString(C.go_libzfs_error_description(d.h))
-		return nil, fmt.Errorf("failed to open snapshot %s (errno %d): %s", snapshotName, errno, desc)
+		return nil, notFound(int(errno), fmt.Errorf("failed to open snapshot %s (errno %d): %s", snapshotName, errno, desc))
 	}
 	defer C.zfs_close(zhp)
 
@@ -1353,7 +1365,7 @@ func (d *libzfsDriver) DestroyClone(ctx context.Context, cloneName string, force
 	if zhp == nil {
 		errno := C.go_libzfs_errno(d.h)
 		desc := C.GoString(C.go_libzfs_error_description(d.h))
-		return fmt.Errorf("failed to open clone %s (errno %d): %s", cloneName, errno, desc)
+		return notFound(int(errno), fmt.Errorf("failed to open clone %s (errno %d): %s", cloneName, errno, desc))
 	}
 	defer C.zfs_close(zhp)
 
@@ -1377,7 +1389,7 @@ func (d *libzfsDriver) DestroyClone(ctx context.Context, cloneName string, force
 	if ret != 0 {
 		errno := C.go_libzfs_errno(d.h)
 		desc := C.GoString(C.go_libzfs_error_description(d.h))
-		return fmt.Errorf("failed to destroy clone %s (errno %d): %s", cloneName, errno, desc)
+		return notFound(int(errno), fmt.Errorf("failed to destroy clone %s (errno %d): %s", cloneName, errno, desc))
 	}
 
 	return nil

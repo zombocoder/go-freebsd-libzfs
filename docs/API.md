@@ -310,6 +310,14 @@ for name, prop := range props {
 }
 ```
 
+Each `Property` carries `Value` (the text libzfs prints, e.g. `"439G"`) and,
+for numeric properties (`used`, `available`, `refreservation`, `volsize`,
+`quota`, ...), `Numeric` with the exact value (bytes for sizes) and
+`IsNumeric == true`. `GetUint64Property` returns the exact value.
+
+Operations on a dataset, snapshot or clone that does not exist return an error
+for which `errors.Is(err, errors.ErrDatasetNotFound)` is true.
+
 Names containing a colon are user properties; an unset one is left out of the
 result. A name that is neither a native ZFS property nor a user property fails
 with `errors.ErrInvalidArgument`.

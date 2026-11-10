@@ -32,6 +32,16 @@ versions may contain breaking API changes; they are listed under "Changed".
 
 ### Fixed
 
+- `GetUint64Property` could never succeed: numeric properties came back only
+  as text ("439G"). `Property` now has `Numeric` (exact value, bytes for
+  sizes, read with `zfs_prop_get_numeric`) and `IsNumeric`; `Value` keeps the
+  human-readable text, so existing callers are unaffected. `GetUint64Property`
+  returns the exact value and fails for non-numeric properties.
+- Missing datasets: opening, getting, setting properties on, destroying (also
+  snapshots and clones) or cloning from a dataset or snapshot that does not
+  exist now returns an error matching `errors.ErrDatasetNotFound`
+  (`errors.Is`), so "already gone" can be treated as success. `Client.Get`
+  also wraps it. The message text is unchanged.
 - Spurious `signal received` (`EZFS_INTR`) failures: libzfs does not retry an
   ioctl interrupted by a signal, and the Go runtime signals threads at any
   time (preemption, GC). Every driver operation now blocks asynchronous

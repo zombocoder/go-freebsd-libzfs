@@ -81,6 +81,13 @@ type PropertyInfo struct {
 	Value    any
 	Source   PropSource
 	Received bool
+
+	// Numeric is the exact value of a numeric property (used, available,
+	// refreservation, volsize, ...) in its base unit (bytes for sizes).
+	// IsNumeric is false for string and index properties such as
+	// mountpoint or compression.
+	Numeric   uint64
+	IsNumeric bool
 }
 
 // UserPropertyInfo is the value and source of a ZFS user property
