@@ -99,6 +99,9 @@ func TestMissingDatasetMatchesErrDatasetNotFound(t *testing.T) {
 		"DestroyClone":        c.DestroyClone(ctx, missing, false),
 		"CreateClone":         c.CreateClone(ctx, pool+"/real@nosnap", pool+"/clone", nil),
 		"CreateClone(ds)":     c.CreateClone(ctx, missing+"@s", pool+"/clone", nil),
+		"CreateClone(parent)": c.CreateClone(ctx, pool+"/real@s", pool+"/noparent/clone", nil),
+		"CreateSnapshot":      c.CreateSnapshot(ctx, missing+"@s", false, nil),
+		"CreateFilesystem":    c.CreateFilesystem(ctx, pool+"/noparent/fs", nil),
 		"FindByUserProperty": func() error {
 			_, err := c.FindByUserProperty(ctx, missing, propAgent, "x")
 			return err

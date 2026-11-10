@@ -39,15 +39,17 @@ versions may contain breaking API changes; they are listed under "Changed".
   returns the exact value and fails for non-numeric properties.
 - Missing datasets: opening, getting, setting properties on, destroying (also
   snapshots and clones) or cloning from a dataset or snapshot that does not
-  exist now returns an error matching `errors.ErrDatasetNotFound`
-  (`errors.Is`), so "already gone" can be treated as success. `Client.Get`
-  also wraps it. The message text is unchanged.
+  exist, creating a snapshot of a missing dataset or a dataset or clone under a
+  missing parent now returns an error matching `errors.ErrDatasetNotFound`
+  (`errors.Is`), so "already gone" can be treated as success. For
+  `CreateClone` it covers both a missing source snapshot and a missing parent
+  of the clone. `Client.Get` also wraps it. The message text is unchanged.
 - Spurious `signal received` (`EZFS_INTR`) failures: libzfs does not retry an
   ioctl interrupted by a signal, and the Go runtime signals threads at any
   time (preemption, GC). Every driver operation now blocks asynchronous
   signals on its thread while it is inside libzfs, and read-only listings
-  (pools, datasets, user-property walks) retry up to three times if libzfs
-  still reports an interruption.
+  (pools, datasets, user-property walks) are repeated, up to three attempts in
+  all, when libzfs still reports an interruption.
 - Handle leak in dataset and pool listing: libzfs passes each handle to the
   iteration callback, which must close it; `List`, `ListInPool`,
   `ListSnapshots`, `zpool.Client.List` and friends never did, leaking one

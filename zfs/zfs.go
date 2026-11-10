@@ -179,9 +179,12 @@ type Property[T any] struct {
 	Received bool
 
 	// Numeric is the exact value of a numeric property (used, available,
-	// refreservation, volsize, ...) in its base unit, e.g. bytes. IsNumeric
-	// is false for string and index properties (mountpoint, compression).
-	// Value remains the human-readable text such as "439G".
+	// refreservation, volsize, ...). The unit depends on the property: bytes
+	// for sizes, seconds for times, percent*100 for compressratio, plain
+	// counts and ids otherwise. For quota, reservation, refquota and
+	// refreservation 0 means "none"; check Value to tell. IsNumeric is false
+	// for string and index properties (mountpoint, compression). Value
+	// remains the human-readable text such as "439G".
 	Numeric   uint64
 	IsNumeric bool
 }

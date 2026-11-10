@@ -299,12 +299,11 @@ func (d *libzfsDriver) ListPools(ctx context.Context) ([]PoolInfo, error) {
 	var iterData *poolIterData
 	errBefore := C.libzfs_errno(d.h)
 	for attempt := 1; ; attempt++ {
-		attemptBefore := C.libzfs_errno(d.h)
 		iterData = &poolIterData{}
 		if C.go_iter_pools(d.h, (*[0]byte)(C.go_pool_iter_callback), unsafe.Pointer(iterData)) == 0 {
 			break
 		}
-		if attempt >= maxIterAttempts || !interrupted(d.h, attemptBefore) {
+		if attempt >= maxIterAttempts || !interrupted(d.h, iterData.err) {
 			return nil, iterError("failed to iterate pools", d.h, errBefore)
 		}
 	}
@@ -405,8 +404,10 @@ func (d *libzfsDriver) enter() func() {
 	d.mu.Lock()
 	unmask := maskSignals()
 	return func() {
+		// Unlock even if unmask panics (it does when the signal mask cannot
+		// be restored), so a recovered panic does not leave the driver locked.
+		defer d.mu.Unlock()
 		unmask()
-		d.mu.Unlock()
 	}
 }
 
@@ -416,13 +417,14 @@ func (d *libzfsDriver) enter() func() {
 // chosen to take them), so this is defence in depth only.
 const maxIterAttempts = 3
 
-// interrupted reports whether libzfs recorded a new EZFS_INTR since before
-// was read. libzfs never clears its error, so a stale EZFS_INTR left by an
-// earlier call is not mistaken for an interruption of this one (the price is
-// that a second EZFS_INTR in a row cannot be told apart and is not retried).
-func interrupted(h *C.libzfs_handle_t, before C.int) bool {
-	now := C.libzfs_errno(h)
-	return now == C.EZFS_INTR && now != before
+// interrupted reports whether a failed iteration should be retried: the
+// callbacks did not abort it (abortErr is nil) and libzfs recorded EZFS_INTR.
+// Iterations only read, so repeating one is always safe. libzfs never clears
+// its error, so a stale EZFS_INTR from an earlier call can cause a retry too;
+// that costs at most maxIterAttempts-1 extra passes before the real error is
+// reported.
+func interrupted(h *C.libzfs_handle_t, abortErr error) bool {
+	return abortErr == nil && C.libzfs_errno(h) == C.EZFS_INTR
 }
 
 // OutstandingIterHandles returns the number of libzfs handles received in
@@ -530,7 +532,6 @@ func (d *libzfsDriver) ListDatasetsByType(ctx context.Context, dsType *DatasetTy
 	var iterData *datasetIterData
 	errBefore := C.libzfs_errno(d.h)
 	for attempt := 1; ; attempt++ {
-		attemptBefore := C.libzfs_errno(d.h)
 		iterData = &datasetIterData{}
 		var ret C.int
 		if recursive {
@@ -541,7 +542,7 @@ func (d *libzfsDriver) ListDatasetsByType(ctx context.Context, dsType *DatasetTy
 		if ret == 0 {
 			break
 		}
-		if attempt >= maxIterAttempts || !interrupted(d.h, attemptBefore) {
+		if attempt >= maxIterAttempts || !interrupted(d.h, iterData.err) {
 			return nil, iterError("failed to iterate datasets", d.h, errBefore)
 		}
 	}
@@ -996,7 +997,7 @@ func (d *libzfsDriver) CreateDataset(ctx context.Context, datasetName string, ds
 	ret := C.go_zfs_create(d.h, datasetNameC, zfsType, propsNvlist)
 	if ret != 0 {
 		errno, desc := d.getLibzfsError()
-		return fmt.Errorf("failed to create dataset %s (errno %d): %s", datasetName, errno, desc)
+		return notFound(int(errno), fmt.Errorf("failed to create dataset %s (errno %d): %s", datasetName, errno, desc))
 	}
 
 	return nil
@@ -1097,7 +1098,7 @@ func (d *libzfsDriver) CreateSnapshot(ctx context.Context, snapshotName string, 
 	if ret != 0 {
 		errno := C.go_libzfs_errno(d.h)
 		desc := C.GoString(C.go_libzfs_error_description(d.h))
-		return fmt.Errorf("failed to create snapshot %s (errno %d): %s", snapshotName, errno, desc)
+		return notFound(int(errno), fmt.Errorf("failed to create snapshot %s (errno %d): %s", snapshotName, errno, desc))
 	}
 
 	return nil
