@@ -80,6 +80,14 @@ func (d *ioctlDriver) GetDatasetProps(ctx context.Context, datasetName string, p
 	return nil, fmt.Errorf("ioctl dataset properties not implemented yet")
 }
 
+func (d *ioctlDriver) GetUserProperties(ctx context.Context, datasetName string) (map[string]UserPropertyInfo, error) {
+	return nil, fmt.Errorf("ioctl user properties not implemented yet")
+}
+
+func (d *ioctlDriver) ListDescendantUserProps(ctx context.Context, parent string) ([]ChildUserProps, error) {
+	return nil, fmt.Errorf("ioctl user properties not implemented yet")
+}
+
 func (d *ioctlDriver) GetPoolStatus(ctx context.Context, poolName string) (*PoolStatus, error) {
 	return nil, fmt.Errorf("ioctl GetPoolStatus not implemented yet")
 }

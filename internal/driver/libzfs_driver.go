@@ -24,6 +24,12 @@ extern int go_iter_all_datasets(libzfs_handle_t* hdl, int (*func)(zfs_handle_t *
 extern int go_pool_iter_callback(zpool_handle_t *, void *);
 extern int go_dataset_iter_callback(zfs_handle_t *, void *);
 
+// Iteration handle accounting
+extern void go_iter_given(void);
+extern void go_iter_close_zfs(zfs_handle_t* zhp);
+extern void go_iter_close_zpool(zpool_handle_t* zhp);
+extern long go_iter_outstanding(void);
+
 // Pool state and health
 extern int go_zpool_get_state(zpool_handle_t* zhp);
 extern int go_zpool_get_status(zpool_handle_t* zhp, char** msgid);
@@ -165,6 +171,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/zombocoder/go-freebsd-libzfs/errors"
+
 	// Import the cgo package to link its C code
 	_ "github.com/zombocoder/go-freebsd-libzfs/internal/cgo"
 )
@@ -248,6 +256,10 @@ type poolIterData struct {
 
 //export go_pool_iter_callback
 func go_pool_iter_callback(zhp *C.zpool_handle_t, data unsafe.Pointer) C.int {
+	// zpool_iter hands the handle to the callback, which must close it.
+	C.go_iter_given()
+	defer C.go_iter_close_zpool(zhp)
+
 	iterData := (*poolIterData)(data)
 
 	name := C.GoString(C.go_zpool_get_name(zhp))
@@ -283,11 +295,10 @@ func (d *libzfsDriver) ListPools(ctx context.Context) ([]PoolInfo, error) {
 	iterData := &poolIterData{}
 
 	// Call C function to iterate pools
+	errBefore := C.libzfs_errno(d.h)
 	ret := C.go_iter_pools(d.h, (*[0]byte)(C.go_pool_iter_callback), unsafe.Pointer(iterData))
 	if ret != 0 {
-		errno := C.go_libzfs_errno(d.h)
-		desc := C.GoString(C.go_libzfs_error_description(d.h))
-		return nil, fmt.Errorf("failed to iterate pools (errno %d): %s", errno, desc)
+		return nil, iterError("failed to iterate pools", d.h, errBefore)
 	}
 
 	if iterData.err != nil {
@@ -361,6 +372,29 @@ func (d *libzfsDriver) GetPoolProps(ctx context.Context, poolName string, propNa
 	return properties, nil
 }
 
+// OutstandingIterHandles returns the number of libzfs handles received in
+// iteration callbacks and not closed yet. It is 0 whenever no iteration is
+// running; a larger value means a handle leak. Used by tests.
+func OutstandingIterHandles() int64 {
+	return int64(C.go_iter_outstanding())
+}
+
+// iterError describes a failed iteration. libzfs never clears its error, so
+// the libzfs error is reported only if it changed during the iteration
+// (before is the code taken just before it); otherwise the callback aborted
+// and the message says so.
+func iterError(what string, h *C.libzfs_handle_t, before C.int) error {
+	errno := C.libzfs_errno(h)
+	if errno == 0 || errno == before {
+		return fmt.Errorf("%s: iteration aborted", what)
+	}
+	return fmt.Errorf("%s (errno %d): %s", what, errno, C.GoString(C.libzfs_error_description(h)))
+}
+
+// maxPropLen is the buffer size for a native property value; it matches
+// ZAP_MAXVALUELEN so long values (origin, clones, mountpoint) are not cut.
+const maxPropLen = 8192
+
 // Dataset iteration callback data
 type datasetIterData struct {
 	datasets []DatasetInfo
@@ -369,6 +403,8 @@ type datasetIterData struct {
 
 //export go_dataset_iter_callback
 func go_dataset_iter_callback(zhp *C.zfs_handle_t, data unsafe.Pointer) C.int {
+	// The C iteration wrappers (go_iter_datasets, go_iter_all_datasets) own
+	// and close the handle after this returns.
 	iterData := (*datasetIterData)(data)
 
 	name := C.GoString(C.go_zfs_get_name(zhp))
@@ -441,6 +477,7 @@ func (d *libzfsDriver) ListDatasetsByType(ctx context.Context, dsType *DatasetTy
 
 	iterData := &datasetIterData{}
 
+	errBefore := C.libzfs_errno(d.h)
 	var ret C.int
 	if recursive {
 		ret = C.go_iter_all_datasets(d.h, (*[0]byte)(C.go_dataset_iter_callback), unsafe.Pointer(iterData))
@@ -448,9 +485,7 @@ func (d *libzfsDriver) ListDatasetsByType(ctx context.Context, dsType *DatasetTy
 		ret = C.go_iter_datasets(d.h, (*[0]byte)(C.go_dataset_iter_callback), unsafe.Pointer(iterData))
 	}
 	if ret != 0 {
-		errno := C.go_libzfs_errno(d.h)
-		desc := C.GoString(C.go_libzfs_error_description(d.h))
-		return nil, fmt.Errorf("failed to iterate datasets (errno %d): %s", errno, desc)
+		return nil, iterError("failed to iterate datasets", d.h, errBefore)
 	}
 
 	if iterData.err != nil {
@@ -517,23 +552,47 @@ func (d *libzfsDriver) GetDatasetProps(ctx context.Context, datasetName string, 
 		}
 	}
 
-	// Retrieve each requested property
+	// Retrieve each requested property. User properties (names with a colon)
+	// come from the dataset's user property list; an unset one is omitted.
+	// Native names are resolved through libzfs, so every native property is
+	// available; a name that is neither is an error.
+	var userProps map[string]UserPropertyInfo
 	for _, propName := range propNames {
-		if propFunc, exists := propMap[propName]; exists {
-			propValue := propFunc()
-			buf := make([]byte, 1024)
-			var src C.int
-			ret := C.go_get_zfs_property(zhp, propValue, (*C.char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)), &src)
-
-			if ret == 0 {
-				// Successfully retrieved property
-				value := C.GoString((*C.char)(unsafe.Pointer(&buf[0])))
+		if strings.Contains(propName, ":") {
+			if userProps == nil {
+				userProps = readUserProps(zhp)
+			}
+			if up, ok := userProps[propName]; ok {
 				properties[propName] = PropertyInfo{
-					Name:     propName,
-					Value:    value,
-					Source:   mapPropSource(src),
-					Received: false,
+					Name:   propName,
+					Value:  up.Value,
+					Source: up.Source,
 				}
+			}
+			continue
+		}
+
+		var propValue C.int
+		if propFunc, exists := propMap[propName]; exists {
+			propValue = propFunc()
+		} else {
+			cName := C.CString(propName)
+			propValue = C.int(C.zfs_name_to_prop(cName))
+			C.free(unsafe.Pointer(cName))
+			if propValue < 0 {
+				return nil, fmt.Errorf("unknown property %q: %w", propName, errors.ErrInvalidArgument)
+			}
+		}
+
+		buf := make([]byte, maxPropLen)
+		var src C.int
+		ret := C.go_get_zfs_property(zhp, propValue, (*C.char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)), &src)
+		if ret == 0 {
+			properties[propName] = PropertyInfo{
+				Name:     propName,
+				Value:    C.GoString((*C.char)(unsafe.Pointer(&buf[0]))),
+				Source:   mapPropSource(src),
+				Received: false,
 			}
 		}
 	}

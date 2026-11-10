@@ -83,6 +83,20 @@ type PropertyInfo struct {
 	Received bool
 }
 
+// UserPropertyInfo is the value and source of a ZFS user property
+// (a property whose name contains a colon, e.g. "org.example:key")
+type UserPropertyInfo struct {
+	Value  string
+	Source PropSource
+}
+
+// ChildUserProps holds the user properties of one descendant dataset
+type ChildUserProps struct {
+	Name  string
+	Type  DatasetType
+	Props map[string]UserPropertyInfo
+}
+
 // ImportOptions represents options for pool import
 type ImportOptions struct {
 	NewName   string // Optional new name for the pool
@@ -230,6 +244,12 @@ type Driver interface {
 	ListDatasetsInPool(ctx context.Context, poolName string, recursive bool) ([]DatasetInfo, error)
 	ListDatasetsByType(ctx context.Context, dsType *DatasetType, recursive bool) ([]DatasetInfo, error)
 	GetDatasetProps(ctx context.Context, datasetName string, propNames []string) (map[string]PropertyInfo, error)
+	GetUserProperties(ctx context.Context, datasetName string) (map[string]UserPropertyInfo, error)
+	// ListDescendantUserProps returns the user properties of every filesystem
+	// and volume below parent (not parent itself, no snapshots), read in one
+	// pass. It fails if parent does not exist; descendants destroyed during
+	// the walk are skipped.
+	ListDescendantUserProps(ctx context.Context, parent string) ([]ChildUserProps, error)
 	SetDatasetProp(ctx context.Context, datasetName, propName, propValue string) error
 	CreateDataset(ctx context.Context, datasetName string, dsType DatasetType, props map[string]string) error
 	DestroyDataset(ctx context.Context, datasetName string, recursive bool) error

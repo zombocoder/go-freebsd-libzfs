@@ -248,10 +248,22 @@ const (
 	PropertyNameKeystatus     = "keystatus"
 )
 
-// GetProperties retrieves multiple properties for a dataset
+// GetProperties retrieves multiple properties for a dataset.
+//
+// Names containing a colon are user properties; a user property that is not
+// set is left out of the result. Any other name must be a native ZFS property
+// or the call fails with errors.ErrInvalidArgument. Native properties that do
+// not apply to the dataset (e.g. volsize on a filesystem) are left out.
 func (c *Client) GetProperties(ctx context.Context, datasetName string, propNames ...string) (map[string]Property[any], error) {
 	if c.d == nil {
 		return nil, fmt.Errorf("client is closed")
+	}
+	for _, name := range propNames {
+		if isUserPropertyName(name) {
+			if err := validateUserPropertyName(name); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	propInfos, err := c.d.GetDatasetProps(ctx, datasetName, propNames)
@@ -332,6 +344,12 @@ func (c *Client) GetBoolProperty(ctx context.Context, datasetName, propName stri
 func (c *Client) SetProperty(ctx context.Context, datasetName, propName, propValue string) error {
 	if c.d == nil {
 		return fmt.Errorf("client is closed")
+	}
+
+	if isUserPropertyName(propName) {
+		if err := validateUserProperty(propName, propValue); err != nil {
+			return err
+		}
 	}
 
 	return c.d.SetDatasetProp(ctx, datasetName, propName, propValue)
@@ -426,6 +444,10 @@ func (c *Client) Create(ctx context.Context, datasetName string, dsType DatasetT
 		return fmt.Errorf("unsupported dataset type for creation: %s", dsType)
 	}
 
+	if err := validateUserProperties(opts.Properties); err != nil {
+		return err
+	}
+
 	return c.d.CreateDataset(ctx, datasetName, driverType, opts.Properties)
 }
 
@@ -457,6 +479,10 @@ func (c *Client) Destroy(ctx context.Context, datasetName string, recursive bool
 func (c *Client) CreateSnapshot(ctx context.Context, snapshotName string, recursive bool, properties map[string]string) error {
 	if c.d == nil {
 		return fmt.Errorf("client is closed")
+	}
+
+	if err := validateUserProperties(properties); err != nil {
+		return err
 	}
 
 	return c.d.CreateSnapshot(ctx, snapshotName, recursive, properties)
@@ -501,6 +527,10 @@ type Clone struct {
 func (c *Client) CreateClone(ctx context.Context, snapshotName, cloneName string, properties map[string]string) error {
 	if c.d == nil {
 		return fmt.Errorf("client is closed")
+	}
+
+	if err := validateUserProperties(properties); err != nil {
+		return err
 	}
 
 	return c.d.CreateClone(ctx, snapshotName, cloneName, properties)

@@ -25,7 +25,7 @@ This library provides idiomatic Go bindings for FreeBSD's OpenZFS stack that cal
 **Complete Dataset Support** - Filesystems, volumes, snapshots, and bookmarks  
 **Advanced Snapshots** - Create, list, rollback, destroy with hierarchical filtering  
 **Clone Operations** - Create, promote, manage, and query clone relationships  
-**Property Management** - Type-safe get/set operations with source tracking  
+**Property Management** - Type-safe get/set operations with source tracking, including user properties  
 **Pool Operations** - Discover, import, export, create, destroy  
 **Pool Health** - `zpool status`-level detail: vdev tree, error counters, scrub/resilver progress, status codes  
 **Scrub Control** - Start, pause, resume and stop scrubs  
@@ -444,6 +444,29 @@ func main() {
     fmt.Printf("Compression is now: %s\n", compression)
 }
 ```
+
+#### User properties
+
+User properties are string annotations whose names contain a colon. They can
+be set with `SetProperty` or at creation (`Create*`, `CreateClone`), and read
+back with `GetUserProperty`, `UserProperties` or `GetProperties`:
+
+```go
+_ = client.SetProperty(ctx, "tank/jobs/c1", "microvm-runner:agent", "agent-1")
+
+value, ok, err := client.GetUserProperty(ctx, "tank/jobs/c1", "microvm-runner:agent")
+// value == "agent-1", ok == true; ok is false if the property is not set.
+// GetUserProperty also returns inherited values; for ownership checks use
+// GetLocalUserProperty, which reports ok only for values set on the dataset itself.
+
+all, err := client.UserProperties(ctx, "tank/jobs/c1") // map[name]{Value, Source}
+
+// Filesystems and volumes below tank/jobs whose property is set locally to "agent-1"
+owned, err := client.FindByUserProperty(ctx, "tank/jobs", "microvm-runner:agent", "agent-1")
+```
+
+`GetProperties` fails with `errors.ErrInvalidArgument` for a name that is
+neither a native nor a user property.
 
 ## Examples
 
