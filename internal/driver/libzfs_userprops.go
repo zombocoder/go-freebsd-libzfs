@@ -163,6 +163,7 @@ func (d *libzfsDriver) ListDescendantUserProps(ctx context.Context, parent strin
 
 	errBefore := C.libzfs_errno(d.h)
 	for attempt := 1; ; attempt++ {
+		attemptBefore := C.libzfs_errno(d.h)
 		w := &userPropsWalk{}
 		h := cgo.NewHandle(w)
 		ret := C.userprops_walk(zhp, C.uintptr_t(h))
@@ -170,7 +171,7 @@ func (d *libzfsDriver) ListDescendantUserProps(ctx context.Context, parent strin
 		if ret == 0 {
 			return w.result, nil
 		}
-		if attempt >= maxIterAttempts || C.libzfs_errno(d.h) != C.EZFS_INTR {
+		if attempt >= maxIterAttempts || !interrupted(d.h, attemptBefore) {
 			return nil, iterError("failed to iterate datasets below "+parent, d.h, errBefore)
 		}
 	}

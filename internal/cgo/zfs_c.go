@@ -57,14 +57,17 @@ int go_zfs_get_type(zfs_handle_t* zhp) {
 // Signal masking. libzfs does not retry ioctls that fail with EINTR, and the
 // Go runtime signals threads (SIGURG for preemption, SIGPROF, ...) at any
 // time, including while a thread is inside libzfs. go_sigs_block blocks every
-// asynchronous signal on the calling thread and go_sigs_restore puts the
-// previous mask back. The caller must stay on the same OS thread in between
-// (runtime.LockOSThread). Synchronous fault signals stay unblocked so a
-// crash is still reported by the runtime instead of killing the process.
-static __thread sigset_t go_saved_sigmask;
-
-void go_sigs_block(void) {
+// asynchronous signal on the calling thread and returns the previous mask in
+// malloc'd storage (NULL if the mask could not be changed); go_sigs_restore
+// puts that mask back, frees it and returns 0 on success. The caller must
+// stay on the same OS thread in between (runtime.LockOSThread). Synchronous
+// fault signals stay unblocked so a crash is still reported by the runtime
+// instead of killing the process.
+void* go_sigs_block(void) {
     sigset_t all;
+    sigset_t *old = malloc(sizeof(*old));
+    if (old == NULL)
+        return NULL;
     sigfillset(&all);
     sigdelset(&all, SIGSEGV);
     sigdelset(&all, SIGBUS);
@@ -73,11 +76,19 @@ void go_sigs_block(void) {
     sigdelset(&all, SIGTRAP);
     sigdelset(&all, SIGABRT);
     sigdelset(&all, SIGSYS);
-    pthread_sigmask(SIG_BLOCK, &all, &go_saved_sigmask);
+    if (pthread_sigmask(SIG_BLOCK, &all, old) != 0) {
+        free(old);
+        return NULL;
+    }
+    return old;
 }
 
-void go_sigs_restore(void) {
-    pthread_sigmask(SIG_SETMASK, &go_saved_sigmask, NULL);
+int go_sigs_restore(void *saved) {
+    if (saved == NULL)
+        return 0;
+    int rc = pthread_sigmask(SIG_SETMASK, (sigset_t *)saved, NULL);
+    free(saved);
+    return rc;
 }
 
 // Iteration handle accounting. libzfs hands every handle passed to an

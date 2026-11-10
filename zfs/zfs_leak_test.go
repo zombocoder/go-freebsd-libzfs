@@ -52,9 +52,12 @@ func TestIterationClosesHandles(t *testing.T) {
 
 // libzfs does not retry an ioctl that fails with EINTR (EZFS_INTR), so the
 // driver must keep signals away from the thread while it is inside libzfs.
-// The Go runtime sends SIGURG to preempt goroutines and garbage collection
-// preempts constantly, so listings under allocation and CPU pressure must
-// never fail with "signal received".
+// Process-directed signals are delivered to any thread that accepts them,
+// including one blocked in a libzfs ioctl. The SIGURG flood below is what
+// reproduces the failure ("signal received", errno 2035) on the unmasked
+// driver; the Go runtime's own preemption and GC signals alone did not
+// reproduce it on a 16-CPU VM, so a light CPU/GC load is kept only as extra
+// realism.
 func TestListingSurvivesRuntimeSignals(t *testing.T) {
 	pool := newTestPool(t)
 	c := newClient(t)
@@ -67,37 +70,8 @@ func TestListingSurvivesRuntimeSignals(t *testing.T) {
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
-	for i := 0; i < 2*runtime.GOMAXPROCS(0); i++ {
-		wg.Add(1)
-		go func() { // CPU spinner, preempted by signal
-			defer wg.Done()
-			x := 0
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-					x++
-				}
-			}
-		}()
-	}
-	wg.Add(1)
-	go func() { // allocation churn plus forced collections
-		defer wg.Done()
-		var sink [][]byte
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-				sink = append(sink[:0], make([]byte, 1<<20))
-				runtime.GC()
-			}
-		}
-	}()
-	wg.Add(1)
-	go func() { // process-directed signals, delivered to whichever thread accepts them
+	wg.Add(2)
+	go func() { // the essential part: flood the process with SIGURG
 		defer wg.Done()
 		pid := os.Getpid()
 		for {
@@ -109,18 +83,37 @@ func TestListingSurvivesRuntimeSignals(t *testing.T) {
 			}
 		}
 	}()
+	go func() { // light GC pressure
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = make([]byte, 1<<20)
+				runtime.GC()
+			}
+		}
+	}()
 	defer func() { close(stop); wg.Wait() }()
 
+	const minIterations = 100
 	deadline := time.Now().Add(10 * time.Second)
-	for i := 0; i < 3000 && time.Now().Before(deadline); i++ {
+	done := 0
+	for done < 3000 && time.Now().Before(deadline) {
 		if _, err := c.List(ctx, true); err != nil {
-			t.Fatalf("List #%d: %v", i, err)
+			t.Fatalf("List #%d: %v", done, err)
 		}
 		if _, err := c.FindByUserProperty(ctx, pool+"/jobs", propAgent, "A"); err != nil {
-			t.Fatalf("FindByUserProperty #%d: %v", i, err)
+			t.Fatalf("FindByUserProperty #%d: %v", done, err)
 		}
 		if _, _, err := c.GetUserProperty(ctx, pool+"/jobs/d1", propAgent); err != nil {
-			t.Fatalf("GetUserProperty #%d: %v", i, err)
+			t.Fatalf("GetUserProperty #%d: %v", done, err)
 		}
+		done++
+	}
+	t.Logf("%d iterations under the SIGURG flood", done)
+	if done < minIterations {
+		t.Fatalf("only %d iterations ran before the deadline, want at least %d", done, minIterations)
 	}
 }

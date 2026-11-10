@@ -25,8 +25,8 @@ extern int go_pool_iter_callback(zpool_handle_t *, void *);
 extern int go_dataset_iter_callback(zfs_handle_t *, void *);
 
 // Signal masking
-extern void go_sigs_block(void);
-extern void go_sigs_restore(void);
+extern void* go_sigs_block(void);
+extern int go_sigs_restore(void* saved);
 
 // Iteration handle accounting
 extern void go_iter_given(void);
@@ -189,7 +189,9 @@ type libzfsDriver struct {
 
 // NewLibZFS creates a new libzfs-backed driver
 func NewLibZFS() (Driver, error) {
+	unmask := maskSignals()
 	h := C.go_libzfs_init()
+	unmask()
 	if h == nil {
 		return nil, fmt.Errorf("libzfs_init failed")
 	}
@@ -296,11 +298,12 @@ func (d *libzfsDriver) ListPools(ctx context.Context) ([]PoolInfo, error) {
 	var iterData *poolIterData
 	errBefore := C.libzfs_errno(d.h)
 	for attempt := 1; ; attempt++ {
+		attemptBefore := C.libzfs_errno(d.h)
 		iterData = &poolIterData{}
 		if C.go_iter_pools(d.h, (*[0]byte)(C.go_pool_iter_callback), unsafe.Pointer(iterData)) == 0 {
 			break
 		}
-		if attempt >= maxIterAttempts || C.libzfs_errno(d.h) != C.EZFS_INTR {
+		if attempt >= maxIterAttempts || !interrupted(d.h, attemptBefore) {
 			return nil, iterError("failed to iterate pools", d.h, errBefore)
 		}
 	}
@@ -375,25 +378,51 @@ func (d *libzfsDriver) GetPoolProps(ctx context.Context, poolName string, propNa
 	return properties, nil
 }
 
-// enter serialises access to the libzfs handle and keeps asynchronous signals
-// away from the calling thread until the returned function is called, so
-// libzfs ioctls are not interrupted (EZFS_INTR) by Go runtime signals. Use as
+// maskSignals pins the calling goroutine to its OS thread and blocks
+// asynchronous signals on it, so libzfs ioctls are not interrupted (EZFS_INTR)
+// by Go runtime signals. The returned function undoes both. If the mask
+// cannot be set the call proceeds unmasked (best effort); failing to restore
+// it would leave a pooled thread masked for good, so that panics.
+//
+// Child processes started while masked would inherit the mask; nothing in
+// the libzfs paths does that today.
+func maskSignals() func() {
+	runtime.LockOSThread()
+	saved := C.go_sigs_block()
+	return func() {
+		if rc := C.go_sigs_restore(saved); rc != 0 {
+			panic(fmt.Sprintf("restoring thread signal mask failed: %d", rc))
+		}
+		runtime.UnlockOSThread()
+	}
+}
+
+// enter serialises access to the libzfs handle and masks signals on the
+// calling thread until the returned function is called. Use as
 // "defer d.enter()()" at the top of every method that calls into libzfs.
 func (d *libzfsDriver) enter() func() {
 	d.mu.Lock()
-	runtime.LockOSThread()
-	C.go_sigs_block()
+	unmask := maskSignals()
 	return func() {
-		C.go_sigs_restore()
-		runtime.UnlockOSThread()
+		unmask()
 		d.mu.Unlock()
 	}
 }
 
 // maxIterAttempts bounds the retries of a read-only iteration that libzfs
-// reports as interrupted (EZFS_INTR) despite the signal mask, e.g. by a
-// signal sent to the whole process while another thread is in libzfs.
+// reports as interrupted (EZFS_INTR). Signal masking already keeps
+// process-directed signals away from the thread (a blocked thread is never
+// chosen to take them), so this is defence in depth only.
 const maxIterAttempts = 3
+
+// interrupted reports whether libzfs recorded a new EZFS_INTR since before
+// was read. libzfs never clears its error, so a stale EZFS_INTR left by an
+// earlier call is not mistaken for an interruption of this one (the price is
+// that a second EZFS_INTR in a row cannot be told apart and is not retried).
+func interrupted(h *C.libzfs_handle_t, before C.int) bool {
+	now := C.libzfs_errno(h)
+	return now == C.EZFS_INTR && now != before
+}
 
 // OutstandingIterHandles returns the number of libzfs handles received in
 // iteration callbacks and not closed yet. It is 0 whenever no iteration is
@@ -500,6 +529,7 @@ func (d *libzfsDriver) ListDatasetsByType(ctx context.Context, dsType *DatasetTy
 	var iterData *datasetIterData
 	errBefore := C.libzfs_errno(d.h)
 	for attempt := 1; ; attempt++ {
+		attemptBefore := C.libzfs_errno(d.h)
 		iterData = &datasetIterData{}
 		var ret C.int
 		if recursive {
@@ -510,7 +540,7 @@ func (d *libzfsDriver) ListDatasetsByType(ctx context.Context, dsType *DatasetTy
 		if ret == 0 {
 			break
 		}
-		if attempt >= maxIterAttempts || C.libzfs_errno(d.h) != C.EZFS_INTR {
+		if attempt >= maxIterAttempts || !interrupted(d.h, attemptBefore) {
 			return nil, iterError("failed to iterate datasets", d.h, errBefore)
 		}
 	}
