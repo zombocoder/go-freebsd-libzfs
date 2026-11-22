@@ -95,6 +95,28 @@ if err != nil {
 - `name`: Name of the pool to export
 - `force`: Force export even if datasets are in use
 
+### client.GetProperties(ctx, pool string, names ...string) (map[string]Property[any], error)
+
+Reads pool properties. Any native pool property can be asked for by name
+(`size`, `allocated`, `free`, `capacity`, `fragmentation`, `expandsize`,
+`freeing`, `guid`, `version`, `health`, `ashift`, ...); an unknown name fails
+with `errors.ErrInvalidArgument`. With no names, a default set is returned.
+
+```go
+props, err := client.GetProperties(ctx, "tank", "size", "allocated", "health")
+size, err := client.GetUint64Property(ctx, "tank", "size") // exact bytes
+```
+
+Each `Property` carries `Value` (the text libzfs prints, e.g. `"460G"`) and,
+for numeric properties, `Numeric` with the exact value and `IsNumeric == true`.
+`GetUint64Property` returns the exact value and fails with "is not numeric"
+for other properties such as `health`. Units: bytes for sizes, percent for
+`capacity` and `fragmentation`, plain counts and ids for `guid` and
+`version`. A `Numeric` of 0 can mean "none" (`expandsize`, `freeing`); `Value`
+is then `"-"` or `"none"`. A numeric property libzfs reports as `"-"` without
+a value, such as `fragmentation` on a pool that does not track it, has
+`IsNumeric == false`.
+
 ## Dataset Operations
 
 ### client.List(ctx context.Context, recursive bool) ([]Dataset, error)

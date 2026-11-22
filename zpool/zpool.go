@@ -219,6 +219,18 @@ type Property[T any] struct {
 	Value    T
 	Source   PropertySource
 	Received bool
+
+	// Numeric is the exact value of a numeric pool property (size,
+	// allocated, free, capacity, fragmentation, guid, ...): bytes for sizes,
+	// percent for capacity and fragmentation, plain counts and ids
+	// otherwise. IsNumeric is false for string and index properties
+	// (health, altroot, failmode) and for a numeric property libzfs reports
+	// as "-" because it has no value (fragmentation on a pool that does not
+	// track it). Value remains the human-readable text such as "460G". A
+	// Numeric of 0 can mean "none" (expandsize, freeing, dedup quota);
+	// check Value, which is "-" or "none" then.
+	Numeric   uint64
+	IsNumeric bool
 }
 
 // PropertySource indicates where a property value originates
@@ -277,6 +289,9 @@ func (c *Client) GetProperties(ctx context.Context, poolName string, propNames .
 			Value:    info.Value,
 			Source:   PropertySource(info.Source.String()),
 			Received: info.Received,
+
+			Numeric:   info.Numeric,
+			IsNumeric: info.IsNumeric,
 		}
 		properties[name] = prop
 	}
@@ -303,7 +318,8 @@ func (c *Client) GetStringProperty(ctx context.Context, poolName, propName strin
 	return fmt.Sprintf("%v", prop.Value), nil
 }
 
-// GetUint64Property retrieves a uint64 property value
+// GetUint64Property retrieves the exact value of a numeric property (bytes
+// for sizes). It fails for properties that are not numeric, such as health.
 func (c *Client) GetUint64Property(ctx context.Context, poolName, propName string) (uint64, error) {
 	props, err := c.GetProperties(ctx, poolName, propName)
 	if err != nil {
@@ -315,11 +331,11 @@ func (c *Client) GetUint64Property(ctx context.Context, poolName, propName strin
 		return 0, fmt.Errorf("property %q not found", propName)
 	}
 
-	if val, ok := prop.Value.(uint64); ok {
-		return val, nil
+	if prop.IsNumeric {
+		return prop.Numeric, nil
 	}
 
-	return 0, fmt.Errorf("property %q is not a uint64", propName)
+	return 0, fmt.Errorf("property %q is not numeric", propName)
 }
 
 // Status represents detailed pool status information, as shown by

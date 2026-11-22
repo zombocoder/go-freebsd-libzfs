@@ -354,25 +354,51 @@ func (d *libzfsDriver) GetPoolProps(ctx context.Context, poolName string, propNa
 		}
 	}
 
-	// Retrieve each requested property
+	// Retrieve each requested property. Native names are resolved through
+	// libzfs, so every native pool property is available; a name that is
+	// not one is an error.
 	for _, propName := range propNames {
+		var propValue C.int
 		if propFunc, exists := propMap[propName]; exists {
-			propValue := propFunc()
-			buf := make([]byte, 1024)
-			var src C.int
-			ret := C.go_get_zpool_property(zhp, propValue, (*C.char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)), &src)
-
-			if ret == 0 {
-				// Successfully retrieved property
-				value := C.GoString((*C.char)(unsafe.Pointer(&buf[0])))
-				properties[propName] = PropertyInfo{
-					Name:     propName,
-					Value:    value,
-					Source:   mapPropSource(src),
-					Received: false,
-				}
+			propValue = propFunc()
+		} else {
+			cName := C.CString(propName)
+			propValue = C.int(C.zpool_name_to_prop(cName))
+			C.free(unsafe.Pointer(cName))
+			if propValue < 0 {
+				return nil, fmt.Errorf("unknown property %q: %w", propName, errors.ErrInvalidArgument)
 			}
 		}
+
+		buf := make([]byte, maxPropLen)
+		var src C.int
+		ret := C.go_get_zpool_property(zhp, propValue, (*C.char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)), &src)
+		if ret != 0 {
+			continue
+		}
+		info := PropertyInfo{
+			Name:     propName,
+			Value:    C.GoString((*C.char)(unsafe.Pointer(&buf[0]))),
+			Source:   mapPropSource(src),
+			Received: false,
+		}
+		// Numeric properties also carry their exact value; the string above
+		// is the human-readable form ("460G").
+		// health is typed as a number in libzfs, but it is the internal
+		// vdev state; its text (ONLINE, DEGRADED, ...) is the value.
+		if propValue != C.ZPOOL_PROP_HEALTH &&
+			C.zpool_prop_get_type(C.zpool_prop_t(propValue)) == C.PROP_TYPE_NUMBER {
+			var numSrc C.zprop_source_t
+			num := uint64(C.zpool_get_prop_int(zhp, C.zpool_prop_t(propValue), &numSrc))
+			// libzfs prints "-" for a value it does not have and keeps
+			// UINT64_MAX behind it (fragmentation of a pool that does not
+			// track it); that is not a number to hand out.
+			if !(info.Value == "-" && num == ^uint64(0)) {
+				info.Numeric = num
+				info.IsNumeric = true
+			}
+		}
+		properties[propName] = info
 	}
 
 	return properties, nil
