@@ -7,6 +7,27 @@ versions may contain breaking API changes; they are listed under "Changed".
 
 ## [Unreleased]
 
+### Added
+
+- `zpool.Property` has `Numeric` (exact value) and `IsNumeric`, like
+  `zfs.Property`; `Value` keeps the human-readable text.
+- `zpool.GetProperties` reads any native pool property by name (previously
+  only seven were known), e.g. `ashift`, `fragmentation`, `expandsize`,
+  `freeing`. An unknown name fails with `errors.ErrInvalidArgument`. Values up
+  to 8192 bytes are no longer truncated at 1024.
+
+### Fixed
+
+- `zpool.GetUint64Property` could never succeed: pool properties came back
+  only as text ("460G"). Numeric pool properties (`size`, `allocated`,
+  `free`, `capacity`, `fragmentation`, `expandsize`, `freeing`, `guid`,
+  `version`, ...) now also carry their exact value, read with
+  `zpool_get_prop_int`, and `GetUint64Property` returns it (bytes for sizes,
+  percent for `capacity` and `fragmentation`). It fails with "is not numeric"
+  for `health` and other non-numeric properties, and for a property libzfs
+  reports as "-" with no value (`fragmentation` on a pool that does not track
+  it).
+
 ## [0.3.0] - 2026-11-10
 
 ### Added
